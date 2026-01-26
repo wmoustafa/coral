@@ -35,10 +35,21 @@ public class RegexDomain extends Domain<String, RegexDomain> {
 
   /**
    * Creates a RegexDomain from a regex pattern.
+   * Note: dk.brics.automaton does not support ^ and $ anchors, so we strip them.
+   *
+   * @param regex the regex pattern
    */
   public RegexDomain(String regex) {
     this.regex = regex;
-    this.automaton = new RegExp(regex).toAutomaton();
+    // Strip ^ and $ anchors since dk.brics.automaton doesn't support them
+    String patternForAutomaton = regex;
+    if (patternForAutomaton.startsWith("^")) {
+      patternForAutomaton = patternForAutomaton.substring(1);
+    }
+    if (patternForAutomaton.endsWith("$")) {
+      patternForAutomaton = patternForAutomaton.substring(0, patternForAutomaton.length() - 1);
+    }
+    this.automaton = new RegExp(patternForAutomaton).toAutomaton();
   }
 
   /**
@@ -145,7 +156,7 @@ public class RegexDomain extends Domain<String, RegexDomain> {
   }
 
   private static void dfsCollect(State state, String prefix, List<String> samples, int limit, int maxLength,
-      Set<StateWithPrefix> seen) {
+                                 Set<StateWithPrefix> seen) {
 
     if (samples.size() >= limit || prefix.length() > maxLength)
       return;
