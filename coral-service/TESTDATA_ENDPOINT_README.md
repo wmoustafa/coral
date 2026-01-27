@@ -62,7 +62,41 @@ A new REST endpoint has been added to coral-service for generating test data fro
    - For other columns: Generates random data based on SQL type
 4. **Response**: Returns generated test data as JSON
 
-## Example Usage
+## CLI Command
+
+A command-line interface script is provided for easy interaction with the test data generation endpoint.
+
+### Usage
+
+```bash
+./coral-service/generate-testdata.sh [OPTIONS]
+
+OPTIONS:
+    -q, --query QUERY          SQL query to analyze (required)
+    -l, --language LANGUAGE    Source SQL dialect (hive, trino, spark) [default: hive]
+    -n, --num-rows NUM         Number of rows to generate (1-10000) [default: 10]
+    -h, --host HOST            Service host URL [default: http://localhost:8080]
+    -f, --format FORMAT        Output format (json, pretty, table) [default: table]
+    --help                     Display help message
+```
+
+### CLI Examples
+
+```bash
+# Generate 5 rows with a simple predicate (default table format)
+./coral-service/generate-testdata.sh -q "SELECT * FROM users WHERE name = 'John'" -n 5
+
+# Generate 10 rows with pretty JSON output
+./coral-service/generate-testdata.sh -q "SELECT * FROM users WHERE age = 30" -n 10 -f pretty
+
+# Generate data with JSON format
+./coral-service/generate-testdata.sh -q "SELECT * FROM users" -n 5 -f json
+
+# Use Trino dialect
+./coral-service/generate-testdata.sh -q "SELECT * FROM catalog.schema.table" -l trino -n 3
+```
+
+## REST API Usage
 
 ### Example 1: Simple Equality Predicate
 ```bash
