@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 LinkedIn Corporation. All rights reserved.
+ * Copyright 2017-2026 LinkedIn Corporation. All rights reserved.
  * Licensed under the BSD-2 Clause license.
  * See LICENSE in the project root for license information.
  */
@@ -22,16 +22,20 @@ import org.springframework.web.bind.annotation.RestController;
 import com.linkedin.coral.coralservice.entity.GremlinToRelRequestBody;
 import com.linkedin.coral.coralservice.entity.GremlinToRelResponseBody;
 import com.linkedin.coral.gremlin.gremlin2rel.GremlinToRelConverter;
+import com.linkedin.coral.spark.CoralSpark;
 
 import static com.linkedin.coral.coralservice.utils.CoralProvider.*;
 
 
 /**
- * REST controller for converting Gremlin queries to Coral IR (RelNode).
+ * REST controller for converting Gremlin queries to Coral IR (RelNode) and Spark SQL.
  * 
  * <p>This controller provides an endpoint to convert Apache TinkerPop Gremlin graph
- * traversal queries into Calcite RelNode representation (Coral IR), which can then
- * be converted to various SQL dialects.
+ * traversal queries into:
+ * 1. Calcite RelNode representation (Coral IR)
+ * 2. Spark SQL (via coral-spark)
+ * 
+ * <p>The conversion pipeline is: Gremlin → RelNode → Spark SQL
  */
 @RestController
 @Service
@@ -51,10 +55,14 @@ public class GremlinToRelController implements ApplicationListener<ContextRefres
   }
 
   /**
-   * Converts a Gremlin query to Coral IR (RelNode).
+   * Converts a Gremlin query to Coral IR (RelNode) and Spark SQL.
+   * 
+   * <p>Conversion pipeline:
+   * 1. Gremlin query → RelNode (Coral IR) using GremlinToRelConverter
+   * 2. RelNode → Spark SQL using CoralSpark
    * 
    * @param requestBody contains the Gremlin query and table/column configuration
-   * @return ResponseEntity containing the RelNode string representation or error message
+   * @return ResponseEntity containing the RelNode and Spark SQL representations or error message
    */
   @PostMapping("/api/gremlin/convert")
   public ResponseEntity convert(@RequestBody GremlinToRelRequestBody requestBody) {
@@ -92,25 +100,19 @@ public class GremlinToRelController implements ApplicationListener<ContextRefres
 
     try {
       // Create converter with hiveMetastoreClient directly
-      GremlinToRelConverter converter = new GremlinToRelConverter(
-          hiveMetastoreClient,
-          vertexTable,
-          edgeTable,
-          vertexIdColumn,
-          edgeSrcColumn,
-          edgeDstColumn
-      );
+      GremlinToRelConverter converter = new GremlinToRelConverter(hiveMetastoreClient, vertexTable, edgeTable,
+          vertexIdColumn, edgeSrcColumn, edgeDstColumn);
 
-      // Convert Gremlin to RelNode
+      // Step 1: Convert Gremlin to RelNode (Coral IR)
       RelNode relNode = converter.convertGremlin(gremlinQuery);
       String relNodeString = RelOptUtil.toString(relNode);
 
-      // Create response
-      GremlinToRelResponseBody responseBody = new GremlinToRelResponseBody(
-          gremlinQuery,
-          relNodeString,
-          true
-      );
+      // Step 2: Convert RelNode to Spark SQL using CoralSpark
+      CoralSpark coralSpark = CoralSpark.create(relNode, hiveMetastoreClient);
+      String sparkSql = coralSpark.getSparkSql();
+
+      // Create response with both RelNode and Spark SQL
+      GremlinToRelResponseBody responseBody = new GremlinToRelResponseBody(gremlinQuery, relNodeString, sparkSql, true);
 
       return ResponseEntity.status(HttpStatus.OK).body(responseBody);
 

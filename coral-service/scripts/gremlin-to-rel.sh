@@ -140,6 +140,9 @@ try:
         print()
         print('Coral IR (RelNode):')
         print(data['relNode'])
+        print()
+        print('Spark SQL:')
+        print(data.get('sparkSql', 'N/A'))
     else:
         # Error response
         print('Error:', data if isinstance(data, str) else json.dumps(data, indent=2))

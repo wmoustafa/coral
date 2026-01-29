@@ -80,15 +80,15 @@ CREATE TABLE your_db.edge_table (
 
 ## How It Works
 
-**Architecture: Direct Gremlin → Coral IR**
+**Architecture: Gremlin → Coral IR → Spark SQL**
 
 ```
-Gremlin Query → GremlinToRelConverter → Coral IR (RelNode) using Calcite RelBuilder
+Gremlin Query → GremlinToRelConverter → Coral IR (RelNode) → CoralSpark → Spark SQL
 ```
 
 1. **Parse Gremlin Query**: Simple string-based parsing (prototype)
 2. **Build RelNode Directly**: Uses Calcite's RelBuilder to construct relational algebra
-3. **Convert to Target Dialect**: Coral IR converts to Spark SQL, Trino, etc.
+3. **Convert to Spark SQL**: Uses coral-spark to generate executable Spark SQL
 
 **Direct Conversion Benefits:**
 - ✅ No SQL intermediate step
@@ -127,13 +127,16 @@ g.V().has('name', 'Bob').both()
 // → UNION of out() and in() queries
 ```
 
-## Spark Integration
+## Spark SQL Integration
 
+The REST API automatically converts Gremlin queries to both Coral IR and Spark SQL in a single call.
+
+**Complete Pipeline:**
 ```
-Gremlin Query → GremlinToRelConverter → Coral IR → coral-spark → Spark SQL
+Gremlin Query → GremlinToRelConverter → Coral IR → CoralSpark → Spark SQL
 ```
 
-**Example:**
+**Programmatic Example:**
 ```java
 // 1. Convert Gremlin to Coral IR
 GremlinToRelConverter converter = new GremlinToRelConverter(
@@ -142,13 +145,15 @@ GremlinToRelConverter converter = new GremlinToRelConverter(
 );
 RelNode coralIR = converter.convertGremlin("g.V().has('name', 'Alice').out()");
 
-// 2. Convert Coral IR to Spark SQL (using existing coral-spark)
-SparkSqlGenerator sparkSqlGen = new SparkSqlGenerator();
-String sparkSQL = sparkSqlGen.getSparkSql(coralIR);
+// 2. Convert Coral IR to Spark SQL using CoralSpark
+CoralSpark coralSpark = CoralSpark.create(coralIR, hiveMetastoreClient);
+String sparkSQL = coralSpark.getSparkSql();
 
 // 3. Execute on Spark
 spark.sql(sparkSQL).show();
 ```
+
+**The REST API does both steps automatically** - you get both RelNode and Spark SQL in the response!
 
 ## REST API
 
@@ -167,7 +172,7 @@ The service will start on `http://localhost:8080`
 
 **POST** `/api/gremlin/convert`
 
-Converts a Gremlin query to Coral IR (RelNode) representation.
+Converts a Gremlin query to both Coral IR (RelNode) and Spark SQL.
 
 **Request Body:**
 ```json
@@ -184,8 +189,9 @@ Converts a Gremlin query to Coral IR (RelNode) representation.
 **Response:**
 ```json
 {
-  "gremlinQuery": "g.V().has('name', 'Alice').out()",
-  "relNode": "LogicalProject(member=[$0], name=[$1], age=[$2], location=[$3])\n  LogicalJoin(condition=[=($0, $4)], joinType=[inner])\n    LogicalFilter(condition=[=($1, 'Alice')])\n      LogicalTableScan(table=[[hive, default, members]])\n    LogicalJoin(condition=[=($1, $2)], joinType=[inner])\n      LogicalTableScan(table=[[hive, default, connections]])\n      LogicalTableScan(table=[[hive, default, members]])",
+  "gremlinQuery": "g.V().out()",
+  "relNode": "LogicalJoin(condition=[=($5, $6)], joinType=[inner])\n  LogicalJoin(condition=[=($0, $4)], joinType=[inner])\n    LogicalTableScan(table=[[hive, default, members]])\n    LogicalTableScan(table=[[hive, default, connections]])\n  LogicalTableScan(table=[[hive, default, members]])\n",
+  "sparkSql": "SELECT *\nFROM default.members members\nINNER JOIN default.connections connections ON members.member = connections.src_member\nINNER JOIN default.members members0 ON connections.dst_member = members0.member",
   "success": true
 }
 ```
@@ -207,17 +213,35 @@ curl -X POST http://localhost:8080/api/gremlin/convert \
 
 ### Shell Script (Recommended)
 
-Use the provided shell script that calls the REST API:
+Use the provided shell script that calls the REST API and displays both RelNode and Spark SQL:
 
 ```bash
 cd coral-service/scripts
 ./gremlin-to-rel.sh \
-  --gremlin "g.V().has('name', 'Alice').out()" \
+  --gremlin "g.V().out()" \
   --vertex-table "default.members" \
   --edge-table "default.connections" \
   --vertex-id-column "member" \
   --edge-src-column "src_member" \
   --edge-dst-column "dst_member"
+```
+
+**Output:**
+```
+Gremlin Query: g.V().out()
+
+Coral IR (RelNode):
+LogicalJoin(condition=[=($5, $6)], joinType=[inner])
+  LogicalJoin(condition=[=($0, $4)], joinType=[inner])
+    LogicalTableScan(table=[[hive, default, members]])
+    LogicalTableScan(table=[[hive, default, connections]])
+  LogicalTableScan(table=[[hive, default, members]])
+
+Spark SQL:
+SELECT *
+FROM default.members members
+INNER JOIN default.connections connections ON members.member = connections.src_member
+INNER JOIN default.members members0 ON connections.dst_member = members0.member
 ```
 
 **Note:** Make sure coral-service is running before using the shell script.
@@ -244,9 +268,14 @@ GremlinToRelConverter converter = new GremlinToRelConverter(
 // Convert Gremlin to RelNode
 RelNode relNode = converter.convertGremlin("g.V().has('name', 'Alice').out()");
 
-// Get string representation
+// Get RelNode string representation
 String relNodeString = RelOptUtil.toString(relNode);
-System.out.println(relNodeString);
+System.out.println("RelNode: " + relNodeString);
+
+// Convert RelNode to Spark SQL
+CoralSpark coralSpark = CoralSpark.create(relNode, metastoreClient);
+String sparkSql = coralSpark.getSparkSql();
+System.out.println("Spark SQL: " + sparkSql);
 ```
 
 ## Testing
