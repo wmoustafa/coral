@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 LinkedIn Corporation. All rights reserved.
+ * Copyright 2025-2026 LinkedIn Corporation. All rights reserved.
  * Licensed under the BSD-2 Clause license.
  * See LICENSE in the project root for license information.
  */
@@ -62,8 +62,7 @@ public class GenerateTestDataProgram {
       Map<String, Object> row = new LinkedHashMap<>();
       for (int fieldIndex = 0; fieldIndex < fields.size(); fieldIndex++) {
         RelDataTypeField field = fields.get(fieldIndex);
-        Object value = columnDomains.containsKey(fieldIndex) 
-            ? sampleFromDomain(columnDomains.get(fieldIndex))
+        Object value = columnDomains.containsKey(fieldIndex) ? sampleFromDomain(columnDomains.get(fieldIndex))
             : generateRandomValue(field.getType().getSqlTypeName());
         row.put(field.getName(), value);
       }
@@ -78,10 +77,9 @@ public class GenerateTestDataProgram {
   private Map<Integer, Domain<?, ?>> extractColumnDomains(RelNode relNode) {
     Map<Integer, Domain<?, ?>> columnDomains = new HashMap<>();
     try {
-      DnfRewriter.Output dnfOut = DnfRewriter.convert(
-          CanonicalPredicateExtractor.extract(relNode), 
-          relNode.getCluster().getRexBuilder());
-      
+      DnfRewriter.Output dnfOut =
+          DnfRewriter.convert(CanonicalPredicateExtractor.extract(relNode), relNode.getCluster().getRexBuilder());
+
       dnfOut.disjuncts.forEach(disjunct -> processDisjunct(disjunct, columnDomains));
     } catch (Exception e) {
       System.err.println("Warning: Failed to extract predicates: " + e.getMessage());
@@ -94,10 +92,11 @@ public class GenerateTestDataProgram {
    * Handles both individual predicates and conjunctions (AND).
    */
   private void processDisjunct(RexNode disjunct, Map<Integer, Domain<?, ?>> columnDomains) {
-    if (!(disjunct instanceof org.apache.calcite.rex.RexCall)) return;
-    
+    if (!(disjunct instanceof org.apache.calcite.rex.RexCall))
+      return;
+
     org.apache.calcite.rex.RexCall call = (org.apache.calcite.rex.RexCall) disjunct;
-    
+
     // Handle AND conjunctions by recursively processing each operand
     if (call.getOperator() == org.apache.calcite.sql.fun.SqlStdOperatorTable.AND) {
       for (RexNode operand : call.getOperands()) {
@@ -105,20 +104,22 @@ public class GenerateTestDataProgram {
       }
       return;
     }
-    
+
     // Handle EQUALS predicates
-    if (call.getOperator() != org.apache.calcite.sql.fun.SqlStdOperatorTable.EQUALS) return;
-    
+    if (call.getOperator() != org.apache.calcite.sql.fun.SqlStdOperatorTable.EQUALS)
+      return;
+
     RexNode lhs = call.getOperands().get(0);
     RexNode rhs = call.getOperands().get(1);
-    
-    if (!(rhs instanceof org.apache.calcite.rex.RexLiteral)) return;
-    
+
+    if (!(rhs instanceof org.apache.calcite.rex.RexLiteral))
+      return;
+
     try {
       Domain<?, ?> outputDomain = createDomainFromLiteral((org.apache.calcite.rex.RexLiteral) rhs);
       Domain<?, ?> inputDomain = domainInferenceProgram.deriveInputDomain(lhs, outputDomain);
       Integer columnIndex = findReferencedColumn(lhs);
-      
+
       if (columnIndex != null && !inputDomain.isEmpty()) {
         columnDomains.merge(columnIndex, inputDomain, this::mergeDomains);
       }
@@ -131,9 +132,60 @@ public class GenerateTestDataProgram {
    * Creates a domain from a literal value.
    */
   private Domain<?, ?> createDomainFromLiteral(org.apache.calcite.rex.RexLiteral literal) {
-    return isNumericType(literal.getType().getSqlTypeName())
-        ? IntegerDomain.of(Long.parseLong(literal.getValue2().toString()))
-        : RegexDomain.literal(literal.getValue2().toString());
+    SqlTypeName typeName = literal.getType().getSqlTypeName();
+
+    // For integer types, use IntegerDomain
+    if (isIntegerType(typeName)) {
+      String literalValue = literal.getValue2().toString();
+      return IntegerDomain.of(Long.parseLong(literalValue));
+    }
+
+    // For floating-point types (DOUBLE, FLOAT, DECIMAL), we need to preserve the decimal representation
+    // getValue3() returns the original string representation which preserves decimals
+    // If getValue3() is not available, we fall back to getValue2() with proper handling
+    String literalValue;
+
+    try {
+      // Try getValue3() first - this returns the original string representation
+      Object value3 = literal.getValue3();
+      if (value3 != null) {
+        literalValue = value3.toString();
+      } else {
+        // Fallback to getValue2() with proper BigDecimal handling
+        Object value = literal.getValue2();
+        if (value instanceof java.math.BigDecimal) {
+          literalValue = ((java.math.BigDecimal) value).toPlainString();
+        } else {
+          literalValue = value.toString();
+        }
+      }
+    } catch (Exception e) {
+      // If getValue3() doesn't exist or fails, use getValue2()
+      Object value = literal.getValue2();
+      if (value instanceof java.math.BigDecimal) {
+        literalValue = ((java.math.BigDecimal) value).toPlainString();
+      } else {
+        literalValue = value.toString();
+      }
+    }
+
+    // Use RegexDomain for exact match since we don't have a DoubleDomain
+    return RegexDomain.literal(literalValue);
+  }
+
+  /**
+   * Checks if a SQL type is an integer type (not floating-point).
+   */
+  private boolean isIntegerType(SqlTypeName typeName) {
+    switch (typeName) {
+      case TINYINT:
+      case SMALLINT:
+      case INTEGER:
+      case BIGINT:
+        return true;
+      default:
+        return false;
+    }
   }
 
   /**
@@ -144,11 +196,8 @@ public class GenerateTestDataProgram {
       return ((RexInputRef) expr).getIndex();
     }
     if (expr instanceof org.apache.calcite.rex.RexCall) {
-      return ((org.apache.calcite.rex.RexCall) expr).getOperands().stream()
-          .map(this::findReferencedColumn)
-          .filter(Objects::nonNull)
-          .findFirst()
-          .orElse(null);
+      return ((org.apache.calcite.rex.RexCall) expr).getOperands().stream().map(this::findReferencedColumn)
+          .filter(Objects::nonNull).findFirst().orElse(null);
     }
     return null;
   }
@@ -198,7 +247,8 @@ public class GenerateTestDataProgram {
       case BOOLEAN:
         return random.nextBoolean();
       case DATE:
-        return String.format("%04d-%02d-%02d", 2000 + random.nextInt(25), 1 + random.nextInt(12), 1 + random.nextInt(28));
+        return String.format("%04d-%02d-%02d", 2000 + random.nextInt(25), 1 + random.nextInt(12),
+            1 + random.nextInt(28));
       case TIME:
         return String.format("%02d:%02d:%02d", random.nextInt(24), random.nextInt(60), random.nextInt(60));
       case TIMESTAMP:
@@ -214,14 +264,13 @@ public class GenerateTestDataProgram {
    * Generates a random alphanumeric string using ThreadLocalRandom.
    */
   private String generateRandomString(int length) {
-    return ThreadLocalRandom.current()
-        .ints(length, 0, 62)
-        .mapToObj(i -> {
-          if (i < 10) return String.valueOf((char) ('0' + i));
-          if (i < 36) return String.valueOf((char) ('A' + i - 10));
-          return String.valueOf((char) ('a' + i - 36));
-        })
-        .reduce("", String::concat);
+    return ThreadLocalRandom.current().ints(length, 0, 62).mapToObj(i -> {
+      if (i < 10)
+        return String.valueOf((char) ('0' + i));
+      if (i < 36)
+        return String.valueOf((char) ('A' + i - 10));
+      return String.valueOf((char) ('a' + i - 36));
+    }).reduce("", String::concat);
   }
 
   /**

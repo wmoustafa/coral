@@ -1,5 +1,5 @@
 /**
- * Copyright 2025 LinkedIn Corporation. All rights reserved.
+ * Copyright 2025-2026 LinkedIn Corporation. All rights reserved.
  * Licensed under the BSD-2 Clause license.
  * See LICENSE in the project root for license information.
  */
@@ -70,9 +70,9 @@ public class GenerateTestDataProgramTest {
     converter = new HiveToRelConverter(createMscAdapter(conf));
 
     // Initialize domain inference program with all transformers
-    DomainInferenceProgram domainInferenceProgram = new DomainInferenceProgram(
-        Arrays.asList(new LowerRegexTransformer(), new SubstringRegexTransformer(), new PlusRegexTransformer(),
-            new TimesRegexTransformer(), new CastRegexTransformer()));
+    DomainInferenceProgram domainInferenceProgram =
+        new DomainInferenceProgram(Arrays.asList(new LowerRegexTransformer(), new SubstringRegexTransformer(),
+            new PlusRegexTransformer(), new TimesRegexTransformer(), new CastRegexTransformer()));
 
     // Initialize test data generator
     program = new GenerateTestDataProgram(domainInferenceProgram);
@@ -139,8 +139,7 @@ public class GenerateTestDataProgramTest {
       // Validate that 'name' column starts with '2000'
       Object nameValue = row.get("name");
       assertNotNull(nameValue, "Name column should not be null");
-      assertTrue(nameValue.toString().startsWith("2000"),
-          "Name should start with '2000', but got: " + nameValue);
+      assertTrue(nameValue.toString().startsWith("2000"), "Name should start with '2000', but got: " + nameValue);
 
       // Validate that 'age' and 'birthdate' have random values
       assertNotNull(row.get("age"), "Age column should not be null");
@@ -171,8 +170,7 @@ public class GenerateTestDataProgramTest {
       // Validate that 'name' column starts with '2000'
       Object nameValue = row.get("name");
       assertNotNull(nameValue, "Name column should not be null");
-      assertTrue(nameValue.toString().startsWith("2000"),
-          "Name should start with '2000', but got: " + nameValue);
+      assertTrue(nameValue.toString().startsWith("2000"), "Name should start with '2000', but got: " + nameValue);
 
       // Validate that 'age' is 25
       Object ageValue = row.get("age");
@@ -239,6 +237,89 @@ public class GenerateTestDataProgramTest {
       // Validate that other columns have random values
       assertNotNull(row.get("age"), "Age column should not be null");
       assertNotNull(row.get("birthdate"), "Birthdate column should not be null");
+    }
+
+    System.out.println("=== Test Passed ===\n");
+  }
+
+  @Test
+  public void testGenerateTestDataWithDecimalAndDoubleLiterals() {
+    System.out.println("\n=== Test: Generate Test Data with DECIMAL and DOUBLE Literals ===");
+
+    // First, create a table with DECIMAL and DOUBLE columns
+    Driver driver = new Driver(conf);
+    run(driver, "CREATE TABLE IF NOT EXISTS test.employees (" + "name STRING, " + "salary DECIMAL(10,2), "
+        + "performance_score DOUBLE, " + "age INT)");
+
+    // Test with DECIMAL literal
+    String sql1 = "SELECT * FROM test.employees WHERE salary = 100000.50";
+    System.out.println("SQL 1: " + sql1);
+
+    RelNode relNode1 = converter.convertSql(sql1);
+    RelNode normalized1 = normalize(relNode1);
+
+    List<Map<String, Object>> testData1 = program.generateTestData(normalized1, 3);
+
+    System.out.println("\nGenerated Test Data for DECIMAL predicate:");
+    for (int i = 0; i < testData1.size(); i++) {
+      Map<String, Object> row = testData1.get(i);
+      System.out.println("Row " + (i + 1) + ": " + row);
+
+      // Validate that 'salary' is exactly 100000.50
+      Object salaryValue = row.get("salary");
+      assertNotNull(salaryValue, "Salary column should not be null");
+      assertEquals("100000.50", salaryValue.toString(), "Salary should be 100000.50, but got: " + salaryValue);
+
+      // Other columns should have random values
+      assertNotNull(row.get("name"), "Name column should not be null");
+      assertNotNull(row.get("age"), "Age column should not be null");
+    }
+
+    // Test with DOUBLE literal
+    String sql2 = "SELECT * FROM test.employees WHERE performance_score = 4.5";
+    System.out.println("\nSQL 2: " + sql2);
+
+    RelNode relNode2 = converter.convertSql(sql2);
+    RelNode normalized2 = normalize(relNode2);
+
+    List<Map<String, Object>> testData2 = program.generateTestData(normalized2, 3);
+
+    System.out.println("\nGenerated Test Data for DOUBLE predicate:");
+    for (int i = 0; i < testData2.size(); i++) {
+      Map<String, Object> row = testData2.get(i);
+      System.out.println("Row " + (i + 1) + ": " + row);
+
+      // Validate that 'performance_score' is exactly 4.5
+      Object scoreValue = row.get("performance_score");
+      assertNotNull(scoreValue, "Performance score column should not be null");
+      assertEquals("4.5", scoreValue.toString(), "Performance score should be 4.5, but got: " + scoreValue);
+
+      // Other columns should have random values
+      assertNotNull(row.get("name"), "Name column should not be null");
+      assertNotNull(row.get("age"), "Age column should not be null");
+    }
+
+    // Test with multiple predicates including DECIMAL and DOUBLE
+    String sql3 = "SELECT * FROM test.employees WHERE salary = 100000.50 AND performance_score = 4.5 AND age = 30";
+    System.out.println("\nSQL 3: " + sql3);
+
+    RelNode relNode3 = converter.convertSql(sql3);
+    RelNode normalized3 = normalize(relNode3);
+
+    List<Map<String, Object>> testData3 = program.generateTestData(normalized3, 3);
+
+    System.out.println("\nGenerated Test Data for multiple predicates:");
+    for (int i = 0; i < testData3.size(); i++) {
+      Map<String, Object> row = testData3.get(i);
+      System.out.println("Row " + (i + 1) + ": " + row);
+
+      // Validate all predicate columns
+      assertEquals("100000.50", row.get("salary").toString(), "Salary should be 100000.50");
+      assertEquals("4.5", row.get("performance_score").toString(), "Performance score should be 4.5");
+      assertEquals(30L, row.get("age"), "Age should be 30");
+
+      // Name should have random value
+      assertNotNull(row.get("name"), "Name column should not be null");
     }
 
     System.out.println("=== Test Passed ===\n");
