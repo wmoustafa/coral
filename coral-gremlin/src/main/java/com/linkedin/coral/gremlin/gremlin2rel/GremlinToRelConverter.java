@@ -7,9 +7,11 @@ package com.linkedin.coral.gremlin.gremlin2rel;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
-import org.apache.calcite.jdbc.CalciteSchema;
 import org.apache.calcite.plan.RelTraitDef;
+import org.apache.calcite.rel.RelFieldCollation;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
 import org.apache.calcite.rex.RexNode;
@@ -32,6 +34,14 @@ import com.linkedin.coral.common.HiveTypeSystem;
  * traversal queries to relational plans.
  * 
  * Gremlin queries are converted DIRECTLY to Coral IR (RelNode) without SQL intermediate step.
+ * 
+ * Supports:
+ * - Edge label filtering: .outE("friend"), .inE("colleague")
+ * - Multi-hop traversals: .outE().inV().outE().inV()
+ * - Comparison operators: gt(), lt(), gte(), lte(), neq()
+ * - Deduplication: .dedup()
+ * - Ordering: .order().by("field", decr/incr)
+ * - Projections: .values(), .valueMap()
  */
 public class GremlinToRelConverter {
   private final RelBuilder relBuilder;
@@ -40,6 +50,8 @@ public class GremlinToRelConverter {
   private final String vertexIdColumn;
   private final String edgeSrcColumn;
   private final String edgeDstColumn;
+  private final String edgeLabelColumn;
+  private int aliasCounter = 0;
 
   /**
    * Create a converter with fully configurable table and column names.
@@ -52,18 +64,30 @@ public class GremlinToRelConverter {
    * @param edgeDstColumn Column name for edge destination
    */
   public GremlinToRelConverter(HiveMetastoreClient hiveMetastoreClient, String vertexTable, String edgeTable,
-                               String vertexIdColumn, String edgeSrcColumn, String edgeDstColumn) {
+      String vertexIdColumn, String edgeSrcColumn, String edgeDstColumn) {
+    this(hiveMetastoreClient, vertexTable, edgeTable, vertexIdColumn, edgeSrcColumn, edgeDstColumn, "relation");
+  }
+
+  /**
+   * Create a converter with fully configurable table and column names including edge label column.
+   * 
+   * @param hiveMetastoreClient The Hive metastore client
+   * @param vertexTable Fully qualified table name for vertices
+   * @param edgeTable Fully qualified table name for edges
+   * @param vertexIdColumn Column name for vertex ID
+   * @param edgeSrcColumn Column name for edge source
+   * @param edgeDstColumn Column name for edge destination
+   * @param edgeLabelColumn Column name for edge label/type (e.g., "relation")
+   */
+  public GremlinToRelConverter(HiveMetastoreClient hiveMetastoreClient, String vertexTable, String edgeTable,
+      String vertexIdColumn, String edgeSrcColumn, String edgeDstColumn, String edgeLabelColumn) {
     // Create Hive schema and framework config
     SchemaPlus schemaPlus = Frameworks.createRootSchema(false);
     schemaPlus.add(HiveSchema.ROOT_SCHEMA, new HiveSchema(hiveMetastoreClient));
-    
-    FrameworkConfig config = Frameworks.newConfigBuilder()
-        .defaultSchema(schemaPlus)
-        .typeSystem(new HiveTypeSystem())
-        .traitDefs((List<RelTraitDef>) null)
-        .programs(Programs.ofRules(Programs.RULE_SET))
-        .build();
-    
+
+    FrameworkConfig config = Frameworks.newConfigBuilder().defaultSchema(schemaPlus).typeSystem(new HiveTypeSystem())
+        .traitDefs((List<RelTraitDef>) null).programs(Programs.ofRules(Programs.RULE_SET)).build();
+
     // Create RelBuilder
     Hook.REL_BUILDER_SIMPLIFY.add(Hook.propertyJ(false));
     this.relBuilder = HiveRelBuilder.create(config);
@@ -72,6 +96,7 @@ public class GremlinToRelConverter {
     this.vertexIdColumn = vertexIdColumn;
     this.edgeSrcColumn = edgeSrcColumn;
     this.edgeDstColumn = edgeDstColumn;
+    this.edgeLabelColumn = edgeLabelColumn;
   }
 
   /**
@@ -82,133 +107,421 @@ public class GremlinToRelConverter {
    * @return RelNode representing the query in Coral IR
    */
   public RelNode convertGremlin(String gremlinQuery) {
+    aliasCounter = 0;
     String[] vertexParts = vertexTable.split("\\.");
     String[] edgeParts = edgeTable.split("\\.");
-    
-    // g.V() - scan vertex table
-    if (gremlinQuery.equals("g.V()")) {
-      return relBuilder.scan("hive", vertexParts[0], vertexParts[1]).build();
-    }
-    
-    // g.E() - scan edge table
-    if (gremlinQuery.equals("g.E()")) {
-      return relBuilder.scan("hive", edgeParts[0], edgeParts[1]).build();
-    }
-    
-    // g.V().has('prop', 'val').values() OR g.V().values() - scan + optional filter + optional projection
-    if (gremlinQuery.contains("g.V()") && (gremlinQuery.contains(".has(") || gremlinQuery.contains(".values("))
-        && !gremlinQuery.contains(".out(") && !gremlinQuery.contains(".in(") && !gremlinQuery.contains(".both(")) {
-      relBuilder.scan("hive", vertexParts[0], vertexParts[1]);
-      
-      String[] filter = extractFilter(gremlinQuery);
-      if (filter != null) {
-        relBuilder.filter(relBuilder.equals(relBuilder.field(filter[0]), relBuilder.literal(filter[1])));
-      }
-      
-      if (gremlinQuery.contains(".values(")) {
-        List<String> cols = extractColumns(gremlinQuery);
-        if (cols != null) {
-          List<RexNode> projects = new ArrayList<>();
-          for (String col : cols) {
-            projects.add(relBuilder.field(col));
-          }
-          relBuilder.project(projects);
+
+    // Parse the query into steps
+    List<GremlinStep> steps = parseGremlinSteps(gremlinQuery);
+
+    // Build the relational plan
+    return buildRelationalPlan(steps, vertexParts, edgeParts);
+  }
+
+  /**
+   * Parse Gremlin query into individual steps
+   */
+  private List<GremlinStep> parseGremlinSteps(String query) {
+    List<GremlinStep> steps = new ArrayList<>();
+
+    // Remove whitespace and newlines for easier parsing
+    query = query.replaceAll("\\s+", "");
+
+    // Parse steps manually to handle nested parentheses
+    int i = 0;
+    while (i < query.length()) {
+      // Find next dot followed by step name
+      if (query.charAt(i) == '.') {
+        i++; // skip the dot
+
+        // Extract step name
+        int nameStart = i;
+        while (i < query.length() && Character.isLetterOrDigit(query.charAt(i))) {
+          i++;
         }
+        String stepName = query.substring(nameStart, i);
+
+        // Extract arguments (handle nested parentheses)
+        if (i < query.length() && query.charAt(i) == '(') {
+          i++; // skip opening paren
+          int parenDepth = 1;
+          int argsStart = i;
+
+          while (i < query.length() && parenDepth > 0) {
+            if (query.charAt(i) == '(') {
+              parenDepth++;
+            } else if (query.charAt(i) == ')') {
+              parenDepth--;
+            }
+            if (parenDepth > 0) {
+              i++;
+            }
+          }
+
+          String args = query.substring(argsStart, i);
+          steps.add(new GremlinStep(stepName, args));
+          i++; // skip closing paren
+        }
+      } else {
+        i++;
       }
-      
-      return relBuilder.build();
     }
-    
-    // Traversals: .out(), .in(), .both()
-    if (gremlinQuery.contains(".out(") || gremlinQuery.contains(".in(") || gremlinQuery.contains(".both(")) {
-      return buildTraversal(gremlinQuery, vertexParts, edgeParts);
-    }
-    
-    throw new UnsupportedOperationException("Unsupported Gremlin pattern: " + gremlinQuery);
+
+    return steps;
   }
-  
-  private RelNode buildTraversal(String query, String[] vParts, String[] eParts) {
-    relBuilder.scan("hive", vParts[0], vParts[1]).as("v1");
-    
-    String[] filter = extractFilter(query);
-    if (filter != null) {
-      relBuilder.filter(relBuilder.equals(relBuilder.field("v1", filter[0]), relBuilder.literal(filter[1])));
+
+  /**
+   * Build relational plan from parsed Gremlin steps
+   */
+  private RelNode buildRelationalPlan(List<GremlinStep> steps, String[] vParts, String[] eParts) {
+    if (steps.isEmpty()) {
+      throw new UnsupportedOperationException("Empty Gremlin query");
     }
-    
-    if (query.contains(".out(")) {
-      relBuilder.scan("hive", eParts[0], eParts[1]).as("e");
-      relBuilder.join(JoinRelType.INNER,
-          relBuilder.equals(relBuilder.field(2, "v1", vertexIdColumn), relBuilder.field(2, "e", edgeSrcColumn)));
-      relBuilder.scan("hive", vParts[0], vParts[1]).as("v2");
-      relBuilder.join(JoinRelType.INNER,
-          relBuilder.equals(relBuilder.field(2, "e", edgeDstColumn), relBuilder.field(2, "v2", vertexIdColumn)));
-    } else if (query.contains(".in(")) {
-      relBuilder.scan("hive", eParts[0], eParts[1]).as("e");
-      relBuilder.join(JoinRelType.INNER,
-          relBuilder.equals(relBuilder.field(2, "v1", vertexIdColumn), relBuilder.field(2, "e", edgeDstColumn)));
-      relBuilder.scan("hive", vParts[0], vParts[1]).as("v2");
-      relBuilder.join(JoinRelType.INNER,
-          relBuilder.equals(relBuilder.field(2, "e", edgeSrcColumn), relBuilder.field(2, "v2", vertexIdColumn)));
-    } else if (query.contains(".both(")) {
-      RelNode out = buildOutTraversal(query, vParts, eParts);
-      RelNode in = buildInTraversal(query, vParts, eParts);
-      relBuilder.push(out).push(in).union(true);
+
+    // Start with V() or E()
+    GremlinStep firstStep = steps.get(0);
+    if ("V".equals(firstStep.name)) {
+      relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
+    } else if ("E".equals(firstStep.name)) {
+      relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
+    } else {
+      throw new UnsupportedOperationException("Query must start with g.V() or g.E()");
     }
-    
+
+    // Process remaining steps
+    String currentContext = "vertex"; // "vertex" or "edge"
+
+    for (int i = 1; i < steps.size(); i++) {
+      GremlinStep step = steps.get(i);
+
+      switch (step.name) {
+        case "has":
+          applyHasFilter(step);
+          break;
+        case "outE":
+          applyOutE(step, vParts, eParts);
+          currentContext = "edge";
+          break;
+        case "inE":
+          applyInE(step, vParts, eParts);
+          currentContext = "edge";
+          break;
+        case "bothE":
+          throw new UnsupportedOperationException("bothE() not yet implemented");
+        case "inV":
+          applyInV(vParts, currentContext);
+          currentContext = "vertex";
+          break;
+        case "outV":
+          applyOutV(vParts, currentContext);
+          currentContext = "vertex";
+          break;
+        case "out":
+          applyOut(step, vParts, eParts);
+          currentContext = "vertex";
+          break;
+        case "in":
+          applyIn(step, vParts, eParts);
+          currentContext = "vertex";
+          break;
+        case "dedup":
+          applyDedup();
+          break;
+        case "order":
+          // Order is typically followed by .by(), handled in next iteration
+          break;
+        case "by":
+          applyOrderBy(step);
+          break;
+        case "values":
+          applyValues(step);
+          break;
+        case "valueMap":
+          applyValueMap(step);
+          break;
+        default:
+          throw new UnsupportedOperationException("Unsupported step: ." + step.name + "()");
+      }
+    }
+
     return relBuilder.build();
   }
-  
-  private RelNode buildOutTraversal(String query, String[] vParts, String[] eParts) {
-    relBuilder.scan("hive", vParts[0], vParts[1]).as("v1");
-    String[] filter = extractFilter(query);
-    if (filter != null) {
-      relBuilder.filter(relBuilder.equals(relBuilder.field("v1", filter[0]), relBuilder.literal(filter[1])));
+
+  private void applyHasFilter(GremlinStep step) {
+    // Parse has() arguments - need to handle nested parentheses like has("age", gt(25))
+    String args = step.args;
+
+    // Find first comma that's not inside parentheses
+    int commaPos = -1;
+    int parenDepth = 0;
+    for (int i = 0; i < args.length(); i++) {
+      char c = args.charAt(i);
+      if (c == '(')
+        parenDepth++;
+      else if (c == ')')
+        parenDepth--;
+      else if (c == ',' && parenDepth == 0) {
+        commaPos = i;
+        break;
+      }
     }
-    relBuilder.scan("hive", eParts[0], eParts[1]).as("e");
-    relBuilder.join(JoinRelType.INNER,
-        relBuilder.equals(relBuilder.field(2, "v1", vertexIdColumn), relBuilder.field(2, "e", edgeSrcColumn)));
-    relBuilder.scan("hive", vParts[0], vParts[1]).as("v2");
-    relBuilder.join(JoinRelType.INNER,
-        relBuilder.equals(relBuilder.field(2, "e", edgeDstColumn), relBuilder.field(2, "v2", vertexIdColumn)));
-    return relBuilder.build();
+
+    if (commaPos == -1) {
+      throw new IllegalArgumentException("has() requires at least 2 arguments");
+    }
+
+    String field = cleanString(args.substring(0, commaPos));
+    String valueOrOp = args.substring(commaPos + 1).trim();
+
+    // Check if it's a comparison operator
+    if (valueOrOp.startsWith("gt(") || valueOrOp.startsWith("lt(") || valueOrOp.startsWith("gte(")
+        || valueOrOp.startsWith("lte(") || valueOrOp.startsWith("neq(")) {
+      applyComparisonFilter(field, valueOrOp);
+    } else {
+      // Simple equality
+      Object value = parseValue(valueOrOp);
+      relBuilder.filter(relBuilder.equals(relBuilder.field(field), relBuilder.literal(value)));
+    }
   }
-  
-  private RelNode buildInTraversal(String query, String[] vParts, String[] eParts) {
-    relBuilder.scan("hive", vParts[0], vParts[1]).as("v1");
-    String[] filter = extractFilter(query);
-    if (filter != null) {
-      relBuilder.filter(relBuilder.equals(relBuilder.field("v1", filter[0]), relBuilder.literal(filter[1])));
+
+  private void applyComparisonFilter(String field, String opExpr) {
+    // Parse gt(25), lt(30), etc.
+    // Clean the expression first - remove quotes and extra whitespace
+    opExpr = cleanString(opExpr);
+
+    Pattern pattern = Pattern.compile("(\\w+)\\(([^)]+)\\)");
+    Matcher matcher = pattern.matcher(opExpr);
+
+    if (!matcher.matches()) {
+      throw new IllegalArgumentException("Invalid comparison operator: " + opExpr);
     }
-    relBuilder.scan("hive", eParts[0], eParts[1]).as("e");
-    relBuilder.join(JoinRelType.INNER,
-        relBuilder.equals(relBuilder.field(2, "v1", vertexIdColumn), relBuilder.field(2, "e", edgeDstColumn)));
-    relBuilder.scan("hive", vParts[0], vParts[1]).as("v2");
-    relBuilder.join(JoinRelType.INNER,
-        relBuilder.equals(relBuilder.field(2, "e", edgeSrcColumn), relBuilder.field(2, "v2", vertexIdColumn)));
-    return relBuilder.build();
+
+    String op = matcher.group(1);
+    String valueStr = matcher.group(2);
+    Object value = parseValue(valueStr);
+
+    RexNode fieldNode = relBuilder.field(field);
+    RexNode valueNode = relBuilder.literal(value);
+    RexNode condition;
+
+    switch (op) {
+      case "gt":
+        condition = relBuilder.getRexBuilder().makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN,
+            fieldNode, valueNode);
+        break;
+      case "lt":
+        condition = relBuilder.getRexBuilder().makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.LESS_THAN,
+            fieldNode, valueNode);
+        break;
+      case "gte":
+        condition = relBuilder.getRexBuilder()
+            .makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN_OR_EQUAL, fieldNode, valueNode);
+        break;
+      case "lte":
+        condition = relBuilder.getRexBuilder()
+            .makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.LESS_THAN_OR_EQUAL, fieldNode, valueNode);
+        break;
+      case "neq":
+        condition = relBuilder.getRexBuilder().makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.NOT_EQUALS,
+            fieldNode, valueNode);
+        break;
+      default:
+        throw new UnsupportedOperationException("Unsupported operator: " + op);
+    }
+
+    relBuilder.filter(condition);
   }
-  
-  private String[] extractFilter(String query) {
-    int start = query.indexOf(".has(");
-    if (start == -1) return null;
-    int end = query.indexOf(")", start);
-    String content = query.substring(start + 5, end);
-    String[] parts = content.split(",");
-    if (parts.length == 2) {
-      return new String[]{parts[0].trim().replace("'", ""), parts[1].trim().replace("'", "")};
+
+  private void applyOutE(GremlinStep step, String[] vParts, String[] eParts) {
+    String edgeLabel = step.args.isEmpty() ? null : cleanString(step.args);
+
+    // Join with edge table
+    relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
+
+    // Build join condition: vertex.id = edge.src
+    RexNode leftField = relBuilder.field(2, 0, vertexIdColumn);
+    RexNode rightField = relBuilder.field(2, 1, edgeSrcColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+
+    // Filter by edge label if specified
+    if (edgeLabel != null) {
+      relBuilder.filter(relBuilder.equals(relBuilder.field(edgeLabelColumn), relBuilder.literal(edgeLabel)));
     }
-    return null;
   }
-  
-  private List<String> extractColumns(String query) {
-    int start = query.indexOf(".values(");
-    if (start == -1) return null;
-    int end = query.indexOf(")", start);
-    String content = query.substring(start + 8, end);
-    List<String> cols = new ArrayList<>();
-    for (String col : content.split(",")) {
-      cols.add(col.trim().replace("'", ""));
+
+  private void applyInE(GremlinStep step, String[] vParts, String[] eParts) {
+    String edgeLabel = step.args.isEmpty() ? null : cleanString(step.args);
+
+    // Join with edge table (reversed direction)
+    relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
+
+    // Build join condition: vertex.id = edge.dst
+    RexNode leftField = relBuilder.field(2, 0, vertexIdColumn);
+    RexNode rightField = relBuilder.field(2, 1, edgeDstColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+
+    // Filter by edge label if specified
+    if (edgeLabel != null) {
+      relBuilder.filter(relBuilder.equals(relBuilder.field(edgeLabelColumn), relBuilder.literal(edgeLabel)));
     }
-    return cols;
+  }
+
+  private void applyInV(String[] vParts, String currentContext) {
+    if (!"edge".equals(currentContext)) {
+      throw new IllegalStateException("inV() can only be called after outE() or inE()");
+    }
+
+    // Join with vertex table on destination
+    relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
+
+    // Build join condition: edge.dst = vertex.id
+    RexNode leftField = relBuilder.field(2, 0, edgeDstColumn);
+    RexNode rightField = relBuilder.field(2, 1, vertexIdColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+  }
+
+  private void applyOutV(String[] vParts, String currentContext) {
+    if (!"edge".equals(currentContext)) {
+      throw new IllegalStateException("outV() can only be called after outE() or inE()");
+    }
+
+    // Join with vertex table on source
+    relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
+
+    // Build join condition: edge.src = vertex.id
+    RexNode leftField = relBuilder.field(2, 0, edgeSrcColumn);
+    RexNode rightField = relBuilder.field(2, 1, vertexIdColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+  }
+
+  private void applyOut(GremlinStep step, String[] vParts, String[] eParts) {
+    String edgeLabel = step.args.isEmpty() ? null : cleanString(step.args);
+
+    // Shorthand for outE().inV()
+    // Step 1: Join vertex with edge on vertex.id = edge.src
+    relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
+    RexNode joinCond1Left = relBuilder.field(2, 0, vertexIdColumn);
+    RexNode joinCond1Right = relBuilder.field(2, 1, edgeSrcColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(joinCond1Left, joinCond1Right));
+
+    if (edgeLabel != null) {
+      relBuilder.filter(relBuilder.equals(relBuilder.field(edgeLabelColumn), relBuilder.literal(edgeLabel)));
+    }
+
+    // Step 2: Join with target vertex on edge.dst = vertex.id
+    relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
+    RexNode joinCond2Left = relBuilder.field(2, 0, edgeDstColumn);
+    RexNode joinCond2Right = relBuilder.field(2, 1, vertexIdColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(joinCond2Left, joinCond2Right));
+  }
+
+  private void applyIn(GremlinStep step, String[] vParts, String[] eParts) {
+    String edgeLabel = step.args.isEmpty() ? null : cleanString(step.args);
+
+    // Shorthand for inE().outV()
+    // Step 1: Join vertex with edge on vertex.id = edge.dst
+    relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
+    RexNode joinCond1Left = relBuilder.field(2, 0, vertexIdColumn);
+    RexNode joinCond1Right = relBuilder.field(2, 1, edgeDstColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(joinCond1Left, joinCond1Right));
+
+    if (edgeLabel != null) {
+      relBuilder.filter(relBuilder.equals(relBuilder.field(edgeLabelColumn), relBuilder.literal(edgeLabel)));
+    }
+
+    // Step 2: Join with source vertex on edge.src = vertex.id
+    relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
+    RexNode joinCond2Left = relBuilder.field(2, 0, edgeSrcColumn);
+    RexNode joinCond2Right = relBuilder.field(2, 1, vertexIdColumn);
+    relBuilder.join(JoinRelType.INNER, relBuilder.equals(joinCond2Left, joinCond2Right));
+  }
+
+  private void applyDedup() {
+    // Use aggregate with no aggregation functions to get distinct rows
+    relBuilder.distinct();
+  }
+
+  private void applyOrderBy(GremlinStep step) {
+    String[] parts = step.args.split(",");
+    if (parts.length < 1) {
+      throw new IllegalArgumentException("by() requires at least 1 argument");
+    }
+
+    String field = cleanString(parts[0]);
+    boolean descending = false;
+
+    if (parts.length > 1) {
+      String direction = cleanString(parts[1]);
+      descending = "decr".equals(direction) || "desc".equals(direction);
+    }
+
+    RelFieldCollation.Direction dir =
+        descending ? RelFieldCollation.Direction.DESCENDING : RelFieldCollation.Direction.ASCENDING;
+
+    relBuilder.sort(relBuilder.field(field));
+
+    // Apply direction by rebuilding with proper collation
+    if (descending) {
+      relBuilder.sortLimit(-1, -1, relBuilder.desc(relBuilder.field(field)));
+    }
+  }
+
+  private void applyValues(GremlinStep step) {
+    if (step.args.isEmpty()) {
+      // No projection, return all fields
+      return;
+    }
+
+    String[] fields = step.args.split(",");
+    List<RexNode> projects = new ArrayList<>();
+
+    for (String field : fields) {
+      projects.add(relBuilder.field(cleanString(field)));
+    }
+
+    relBuilder.project(projects);
+  }
+
+  private void applyValueMap(GremlinStep step) {
+    // valueMap is similar to values but returns a map structure
+    // For SQL, we treat it the same as values() - project specific columns
+    applyValues(step);
+  }
+
+  private String nextAlias() {
+    return "t" + (aliasCounter++);
+  }
+
+  private String cleanString(String s) {
+    return s.trim().replace("'", "").replace("\"", "");
+  }
+
+  private Object parseValue(String valueStr) {
+    valueStr = cleanString(valueStr);
+
+    // Try to parse as number
+    try {
+      if (valueStr.contains(".")) {
+        return Double.parseDouble(valueStr);
+      } else {
+        return Integer.parseInt(valueStr);
+      }
+    } catch (NumberFormatException e) {
+      // Return as string
+      return valueStr;
+    }
+  }
+
+  /**
+   * Internal class to represent a Gremlin step
+   */
+  private static class GremlinStep {
+    String name;
+    String args;
+
+    GremlinStep(String name, String args) {
+      this.name = name;
+      this.args = args;
+    }
   }
 }

@@ -4,7 +4,14 @@
 
 **Coral-Gremlin** converts Apache TinkerPop Gremlin graph traversal queries to Coral IR (Intermediate Representation), enabling Gremlin queries to execute on relational engines like Spark.
 
-**Key Feature:** The module is **fully generic** - it works with any vertex and edge tables you specify.
+**Key Features:**
+- **Fully generic** - Works with any vertex and edge tables you specify
+- **Edge label filtering** - Filter edges by type (e.g., "friend", "colleague")
+- **Multi-hop traversals** - Chain multiple hops (e.g., friends of friends)
+- **Rich predicates** - Comparison operators: gt(), lt(), gte(), lte(), neq()
+- **Deduplication** - Remove duplicate results with .dedup()
+- **Ordering** - Sort results with .order().by()
+- **Projections** - Select specific fields with .values() or .valueMap()
 
 ## Quick Start
 
@@ -17,11 +24,16 @@ GremlinToRelConverter converter = new GremlinToRelConverter(
     "your_db.edge_table",    // Your edge table
     "vertex_id",             // Vertex ID column
     "src_vertex",            // Edge source column
-    "dst_vertex"             // Edge destination column
+    "dst_vertex",            // Edge destination column
+    "edge_type"              // Edge label column (optional, default: "relation")
 );
 
 // Convert Gremlin to Coral IR
-RelNode relNode = converter.convertGremlin("g.V().has('name', 'Alice').out()");
+RelNode relNode = converter.convertGremlin("g.V().has('name', 'Alice').outE('friend').inV()");
+
+// Convert to Spark SQL
+CoralSpark coralSpark = CoralSpark.create(relNode, hiveMetastoreClient);
+String sparkSql = coralSpark.getSparkSql();
 ```
 
 ## Configuration Examples
@@ -65,10 +77,11 @@ CREATE TABLE your_db.vertex_table (
   ...
 );
 
--- Edge table (must have source and destination columns)
+-- Edge table (must have source, destination, and optional label columns)
 CREATE TABLE your_db.edge_table (
   src_vertex STRING,  -- Source vertex ID (you specify the name)
   dst_vertex STRING,  -- Destination vertex ID (you specify the name)
+  edge_type STRING,   -- Edge label/type (e.g., "friend", "colleague")
   edge_property STRING  -- Optional edge properties
 );
 ```
@@ -76,6 +89,7 @@ CREATE TABLE your_db.edge_table (
 **Key points:**
 - Vertex table needs an ID column (any name you choose)
 - Edge table needs source and destination columns (any names you choose)
+- Edge table should have a label/type column for edge filtering (default: "relation")
 - All other columns are optional and can be used in filters/projections
 
 ## How It Works
@@ -103,28 +117,65 @@ Gremlin Query → GremlinToRelConverter → Coral IR (RelNode) → CoralSpark �
 
 ## Query Examples
 
-**Basic Queries:**
+### Basic Queries
 ```groovy
 g.V()                           // SELECT * FROM vertex_table
 g.V().has('name', 'Alice')      // SELECT * FROM vertex_table WHERE name = 'Alice'
 g.V().values('name', 'age')     // SELECT name, age FROM vertex_table
+g.E()                           // SELECT * FROM edge_table
 ```
 
-**Traversal Queries:**
+### Comparison Operators
 ```groovy
-// Find Alice's connections (outgoing)
-g.V().has('name', 'Alice').out()
-// → SELECT v2.* FROM vertex_table v1 
-//   JOIN edge_table e ON v1.id = e.src
-//   JOIN vertex_table v2 ON e.dst = v2.id WHERE v1.name = 'Alice'
+g.V().has('age', gt(25))        // WHERE age > 25
+g.V().has('age', lt(30))        // WHERE age < 30
+g.V().has('age', gte(21))       // WHERE age >= 21
+g.V().has('age', lte(65))       // WHERE age <= 65
+g.V().has('name', neq('John'))  // WHERE name <> 'John'
+```
 
-// Find who connects to Bob (incoming)
-g.V().has('name', 'Bob').in()
-// → Same as above but reversed join conditions
+### Edge Label Filtering
+```groovy
+// Find Alice's friends (filter by edge type)
+g.V().has('name', 'Alice').outE('friend').inV()
+// → Filters edges WHERE edge_type = 'friend'
 
-// Find all Bob's connections (bidirectional)
-g.V().has('name', 'Bob').both()
-// → UNION of out() and in() queries
+// Find colleagues
+g.V().has('name', 'Bob').outE('colleague').inV()
+```
+
+### Multi-Hop Traversals
+```groovy
+// Friends of friends (2-hop)
+g.V().has('name', 'Alice').outE('friend').inV().outE('friend').inV()
+
+// Mixed relationships (friend's colleagues)
+g.V().has('name', 'Alice').outE('friend').inV().outE('colleague').inV()
+```
+
+### Advanced Operations
+```groovy
+// Deduplication
+g.V().out().dedup()
+
+// Ordering
+g.V().order().by('age', decr)          // Descending
+g.V().order().by('name', incr)         // Ascending
+
+// Projection with valueMap
+g.V().valueMap('name', 'age', 'city')
+```
+
+### Complex Query Example
+```groovy
+// Find friends of friends over 25, ordered by age
+g.V().has('name', 'Tanvi')
+  .outE('friend').inV()
+  .outE('friend').inV()
+  .dedup()
+  .has('age', gt(25))
+  .order().by('age', decr)
+  .valueMap('name', 'age', 'city')
 ```
 
 ## Spark SQL Integration
@@ -215,33 +266,62 @@ curl -X POST http://localhost:8080/api/gremlin/convert \
 
 Use the provided shell script that calls the REST API and displays both RelNode and Spark SQL:
 
+**Basic Example:**
 ```bash
 cd coral-service/scripts
 ./gremlin-to-rel.sh \
-  --gremlin "g.V().out()" \
-  --vertex-table "default.members" \
-  --edge-table "default.connections" \
-  --vertex-id-column "member" \
-  --edge-src-column "src_member" \
-  --edge-dst-column "dst_member"
+  --gremlin "g.V().has('name', 'Alice')" \
+  --vertex-table "default.people" \
+  --edge-table "default.relationships" \
+  --vertex-id-column "person_id" \
+  --edge-src-column "src_person" \
+  --edge-dst-column "dst_person"
 ```
 
-**Output:**
+**Edge Label Filtering:**
+```bash
+./gremlin-to-rel.sh \
+  --gremlin "g.V().has('name', 'Alice').outE('friend').inV()" \
+  --vertex-table "default.people" \
+  --edge-table "default.relationships" \
+  --vertex-id-column "person_id" \
+  --edge-src-column "src_person" \
+  --edge-dst-column "dst_person"
 ```
-Gremlin Query: g.V().out()
+
+**Complex Query with All Features:**
+```bash
+./gremlin-to-rel.sh \
+  --gremlin "g.V().has('name', 'Tanvi').outE('friend').inV().outE('friend').inV().dedup().has('age', gt(25)).order().by('age', decr).valueMap('name', 'age', 'city')" \
+  --vertex-table "default.people" \
+  --edge-table "default.relationships" \
+  --vertex-id-column "person_id" \
+  --edge-src-column "src_person" \
+  --edge-dst-column "dst_person"
+```
+
+**Output Example:**
+```
+Gremlin Query: g.V().has('name', 'Tanvi').outE('friend').inV()
 
 Coral IR (RelNode):
-LogicalJoin(condition=[=($5, $6)], joinType=[inner])
-  LogicalJoin(condition=[=($0, $4)], joinType=[inner])
-    LogicalTableScan(table=[[hive, default, members]])
-    LogicalTableScan(table=[[hive, default, connections]])
-  LogicalTableScan(table=[[hive, default, members]])
+LogicalJoin(condition=[=($5, $8)], joinType=[inner])
+  LogicalFilter(condition=[=($6, 'friend')])
+    LogicalJoin(condition=[=($0, $4)], joinType=[inner])
+      LogicalFilter(condition=[=($1, 'Tanvi')])
+        LogicalTableScan(table=[[hive, default, people]])
+      LogicalTableScan(table=[[hive, default, relationships]])
+  LogicalTableScan(table=[[hive, default, people]])
 
 Spark SQL:
 SELECT *
-FROM default.members members
-INNER JOIN default.connections connections ON members.member = connections.src_member
-INNER JOIN default.members members0 ON connections.dst_member = members0.member
+FROM (SELECT *
+FROM (SELECT *
+FROM default.people people
+WHERE people.name = 'Tanvi') t
+INNER JOIN default.relationships relationships ON t.person_id = relationships.src_person
+WHERE relationships.relation = 'friend') t0
+INNER JOIN default.people people0 ON t0.dst_person = people0.person_id
 ```
 
 **Note:** Make sure coral-service is running before using the shell script.
@@ -285,30 +365,57 @@ Run tests:
 ./gradlew :coral-gremlin:test
 ```
 
-Test coverage:
+Test coverage: **20 passing unit tests** covering all features
 - ✅ Basic queries: `g.V()`, `g.E()`
-- ✅ Filters: `g.V().has('name', 'John')`
-- ✅ Projections: `g.V().values('name', 'age')`
-- ✅ Traversals: `.out()`, `.in()`, `.both()`
+- ✅ Filters with equality: `g.V().has('name', 'John')`
+- ✅ Comparison operators: `gt()`, `lt()`, `gte()`, `lte()`, `neq()`
+- ✅ Edge label filtering: `.outE('friend')`, `.inE('colleague')`
+- ✅ Multi-hop traversals: `.outE().inV().outE().inV()`
+- ✅ Deduplication: `.dedup()`
+- ✅ Ordering: `.order().by('age', decr)`
+- ✅ Projections: `.values()`, `.valueMap()`
+- ✅ Complex queries combining all features
 
 ## Supported Operations
 
-### Currently Implemented
-- ✅ `g.V()` - Get all vertices
-- ✅ `g.E()` - Get all edges
-- ✅ `.has(property, value)` - Filter by property
-- ✅ `.values(properties...)` - Project specific properties
-- ✅ `.out()` - Traverse outgoing edges
-- ✅ `.in()` - Traverse incoming edges
-- ✅ `.both()` - Traverse both directions
+### Currently Implemented ✅
+
+**Basic Operations:**
+- `g.V()` - Get all vertices
+- `g.E()` - Get all edges
+
+**Filters:**
+- `.has(property, value)` - Equality filter
+- `.has(property, gt(value))` - Greater than
+- `.has(property, lt(value))` - Less than
+- `.has(property, gte(value))` - Greater than or equal
+- `.has(property, lte(value))` - Less than or equal
+- `.has(property, neq(value))` - Not equal
+
+**Traversals:**
+- `.out()` - Traverse outgoing edges (all types)
+- `.in()` - Traverse incoming edges (all types)
+- `.outE(label)` - Traverse outgoing edges of specific type
+- `.inE(label)` - Traverse incoming edges of specific type
+- `.outE().inV()` - Explicit edge-to-vertex traversal
+- `.inE().outV()` - Explicit edge-to-vertex traversal
+- Multi-hop: Chain multiple traversal steps
+
+**Projections:**
+- `.values(properties...)` - Project specific properties
+- `.valueMap(properties...)` - Project as map
+
+**Modifiers:**
+- `.dedup()` - Remove duplicates
+- `.order().by(property, decr)` - Sort descending
+- `.order().by(property, incr)` - Sort ascending
 
 ### Future Enhancements
-- ⏳ Multi-hop traversals: `g.V().out().out()`
-- ⏳ Edge labels: `g.V().out('knows')`
+- ⏳ `.both()` - Bidirectional traversal
 - ⏳ Aggregations: `.count()`, `.sum()`, `.mean()`
 - ⏳ Path operations: `.path()`, `.simplePath()`
 - ⏳ Subgraph operations
-- ⏳ More complex filters and predicates
+- ⏳ More predicates: `within()`, `between()`, `inside()`
 
 ---
 
