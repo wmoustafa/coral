@@ -3,10 +3,10 @@ apply plugin: "java"
 dependencies {
   // Depend on coral-hive for HiveToRelConverter
   compile project(path: ':coral-hive')
-  
+
   // Apache TinkerPop Gremlin dependencies (3.4.x is the last version supporting Java 8)
   compile 'org.apache.tinkerpop:gremlin-core:3.4.13'
-  
+
   testCompile(deps.'hive'.'hive-exec-core') {
     exclude group: 'org.apache.avro', module: 'avro-tools'
     exclude group: 'org.apache.calcite', module: 'calcite-core'

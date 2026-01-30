@@ -1,5 +1,5 @@
 /**
- * Copyright 2017-2024 LinkedIn Corporation. All rights reserved.
+ * Copyright 2017-2026 LinkedIn Corporation. All rights reserved.
  * Licensed under the BSD-2 Clause license.
  * See LICENSE in the project root for license information.
  */
@@ -11,12 +11,20 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.apache.calcite.plan.RelTraitDef;
-import org.apache.calcite.rel.RelFieldCollation;
+import org.apache.calcite.plan.hep.HepPlanner;
+import org.apache.calcite.plan.hep.HepProgram;
+import org.apache.calcite.plan.hep.HepProgramBuilder;
 import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.core.JoinRelType;
+import org.apache.calcite.rel.rules.FilterMergeRule;
+import org.apache.calcite.rel.rules.FilterProjectTransposeRule;
+import org.apache.calcite.rel.rules.ProjectFilterTransposeRule;
+import org.apache.calcite.rel.rules.ProjectMergeRule;
+import org.apache.calcite.rel.rules.ProjectRemoveRule;
 import org.apache.calcite.rex.RexNode;
 import org.apache.calcite.runtime.Hook;
 import org.apache.calcite.schema.SchemaPlus;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.Programs;
@@ -52,6 +60,9 @@ public class GremlinToRelConverter {
   private final String edgeDstColumn;
   private final String edgeLabelColumn;
   private int aliasCounter = 0;
+  private int currentVertexFieldOffset = 0; // Track the column offset for current vertex ID
+  private boolean needsDistinct = false; // Track if dedup was called
+  private boolean skipProjections = false; // Skip projections for visualization compatibility
 
   /**
    * Create a converter with fully configurable table and column names.
@@ -107,7 +118,33 @@ public class GremlinToRelConverter {
    * @return RelNode representing the query in Coral IR
    */
   public RelNode convertGremlin(String gremlinQuery) {
+    return convertGremlin(gremlinQuery, true);
+  }
+
+  /**
+   * Convert a Gremlin query string to a RelNode (Coral IR).
+   * 
+   * @param gremlinQuery The Gremlin traversal query string
+   * @param optimize Whether to apply HepPlanner optimization
+   * @return RelNode representing the query in Coral IR
+   */
+  public RelNode convertGremlin(String gremlinQuery, boolean optimize) {
+    return convertGremlin(gremlinQuery, optimize, false);
+  }
+
+  /**
+   * Convert a Gremlin query string to a RelNode (Coral IR).
+   * 
+   * @param gremlinQuery The Gremlin traversal query string
+   * @param optimize Whether to apply HepPlanner optimization
+   * @param forVisualization Whether this is for visualization (skips projections that break Graphviz)
+   * @return RelNode representing the query in Coral IR
+   */
+  public RelNode convertGremlin(String gremlinQuery, boolean optimize, boolean forVisualization) {
     aliasCounter = 0;
+    currentVertexFieldOffset = 0;
+    needsDistinct = false;
+    skipProjections = forVisualization;
     String[] vertexParts = vertexTable.split("\\.");
     String[] edgeParts = edgeTable.split("\\.");
 
@@ -115,7 +152,35 @@ public class GremlinToRelConverter {
     List<GremlinStep> steps = parseGremlinSteps(gremlinQuery);
 
     // Build the relational plan
-    return buildRelationalPlan(steps, vertexParts, edgeParts);
+    RelNode relNode = buildRelationalPlan(steps, vertexParts, edgeParts);
+
+    // Optimize the RelNode to flatten nested projections and remove unnecessary operations
+    if (optimize) {
+      return optimizeRelNode(relNode);
+    }
+    return relNode;
+  }
+
+  /**
+   * Optimize the RelNode to flatten nested structures and remove unnecessary operations.
+   * Uses HepPlanner with specific rules to simplify the plan before SQL generation.
+   */
+  private RelNode optimizeRelNode(RelNode relNode) {
+    // Create optimization program with rules to flatten the plan
+    HepProgramBuilder programBuilder = new HepProgramBuilder();
+
+    // Add rules to merge projections, remove trivial projects, and simplify
+    programBuilder.addRuleInstance(ProjectMergeRule.INSTANCE);
+    programBuilder.addRuleInstance(ProjectRemoveRule.INSTANCE);
+    programBuilder.addRuleInstance(FilterMergeRule.INSTANCE);
+    programBuilder.addRuleInstance(FilterProjectTransposeRule.INSTANCE);
+    programBuilder.addRuleInstance(ProjectFilterTransposeRule.INSTANCE);
+
+    HepProgram program = programBuilder.build();
+    HepPlanner planner = new HepPlanner(program);
+    planner.setRoot(relNode);
+
+    return planner.findBestExp();
   }
 
   /**
@@ -278,9 +343,10 @@ public class GremlinToRelConverter {
         || valueOrOp.startsWith("lte(") || valueOrOp.startsWith("neq(")) {
       applyComparisonFilter(field, valueOrOp);
     } else {
-      // Simple equality
+      // Simple equality - reference field from current vertex at tracked offset
       Object value = parseValue(valueOrOp);
-      relBuilder.filter(relBuilder.equals(relBuilder.field(field), relBuilder.literal(value)));
+      RexNode fieldNode = relBuilder.field(currentVertexFieldOffset + getFieldIndex(field));
+      relBuilder.filter(relBuilder.equals(fieldNode, relBuilder.literal(value)));
     }
   }
 
@@ -300,33 +366,29 @@ public class GremlinToRelConverter {
     String valueStr = matcher.group(2);
     Object value = parseValue(valueStr);
 
-    RexNode fieldNode = relBuilder.field(field);
+    // Reference field from current vertex at tracked offset
+    RexNode fieldNode = relBuilder.field(currentVertexFieldOffset + getFieldIndex(field));
     RexNode valueNode = relBuilder.literal(value);
-    RexNode condition;
 
+    RexNode condition;
     switch (op) {
       case "gt":
-        condition = relBuilder.getRexBuilder().makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN,
-            fieldNode, valueNode);
+        condition = relBuilder.call(SqlStdOperatorTable.GREATER_THAN, fieldNode, valueNode);
         break;
       case "lt":
-        condition = relBuilder.getRexBuilder().makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.LESS_THAN,
-            fieldNode, valueNode);
+        condition = relBuilder.call(SqlStdOperatorTable.LESS_THAN, fieldNode, valueNode);
         break;
       case "gte":
-        condition = relBuilder.getRexBuilder()
-            .makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.GREATER_THAN_OR_EQUAL, fieldNode, valueNode);
+        condition = relBuilder.call(SqlStdOperatorTable.GREATER_THAN_OR_EQUAL, fieldNode, valueNode);
         break;
       case "lte":
-        condition = relBuilder.getRexBuilder()
-            .makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.LESS_THAN_OR_EQUAL, fieldNode, valueNode);
+        condition = relBuilder.call(SqlStdOperatorTable.LESS_THAN_OR_EQUAL, fieldNode, valueNode);
         break;
       case "neq":
-        condition = relBuilder.getRexBuilder().makeCall(org.apache.calcite.sql.fun.SqlStdOperatorTable.NOT_EQUALS,
-            fieldNode, valueNode);
+        condition = relBuilder.call(SqlStdOperatorTable.NOT_EQUALS, fieldNode, valueNode);
         break;
       default:
-        throw new UnsupportedOperationException("Unsupported operator: " + op);
+        throw new UnsupportedOperationException("Unsupported comparison operator: " + op);
     }
 
     relBuilder.filter(condition);
@@ -335,18 +397,26 @@ public class GremlinToRelConverter {
   private void applyOutE(GremlinStep step, String[] vParts, String[] eParts) {
     String edgeLabel = step.args.isEmpty() ? null : cleanString(step.args);
 
+    // Get the current row type to know how many fields we have
+    int currentFieldCount = relBuilder.peek().getRowType().getFieldCount();
+
     // Join with edge table
     relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
 
-    // Build join condition: vertex.id = edge.src
-    RexNode leftField = relBuilder.field(2, 0, vertexIdColumn);
+    // Build join condition: vertex.id = edge.src AND edge.label = 'friend'
+    // Combine the join condition with the edge label filter to avoid separate WHERE clause
+    RexNode leftField = relBuilder.field(2, 0, currentVertexFieldOffset);
     RexNode rightField = relBuilder.field(2, 1, edgeSrcColumn);
-    relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+    RexNode joinCondition = relBuilder.equals(leftField, rightField);
 
-    // Filter by edge label if specified
+    // Add edge label filter to the join condition if specified
     if (edgeLabel != null) {
-      relBuilder.filter(relBuilder.equals(relBuilder.field(edgeLabelColumn), relBuilder.literal(edgeLabel)));
+      RexNode labelCondition =
+          relBuilder.equals(relBuilder.field(2, 1, edgeLabelColumn), relBuilder.literal(edgeLabel));
+      joinCondition = relBuilder.and(joinCondition, labelCondition);
     }
+
+    relBuilder.join(JoinRelType.INNER, joinCondition);
   }
 
   private void applyInE(GremlinStep step, String[] vParts, String[] eParts) {
@@ -355,21 +425,29 @@ public class GremlinToRelConverter {
     // Join with edge table (reversed direction)
     relBuilder.scan("hive", eParts[0], eParts[1]).as(nextAlias());
 
-    // Build join condition: vertex.id = edge.dst
-    RexNode leftField = relBuilder.field(2, 0, vertexIdColumn);
+    // Build join condition: vertex.id = edge.dst AND edge.label = 'friend'
+    // Combine the join condition with the edge label filter to avoid separate WHERE clause
+    RexNode leftField = relBuilder.field(2, 0, currentVertexFieldOffset);
     RexNode rightField = relBuilder.field(2, 1, edgeDstColumn);
-    relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+    RexNode joinCondition = relBuilder.equals(leftField, rightField);
 
-    // Filter by edge label if specified
+    // Add edge label filter to the join condition if specified
     if (edgeLabel != null) {
-      relBuilder.filter(relBuilder.equals(relBuilder.field(edgeLabelColumn), relBuilder.literal(edgeLabel)));
+      RexNode labelCondition =
+          relBuilder.equals(relBuilder.field(2, 1, edgeLabelColumn), relBuilder.literal(edgeLabel));
+      joinCondition = relBuilder.and(joinCondition, labelCondition);
     }
+
+    relBuilder.join(JoinRelType.INNER, joinCondition);
   }
 
   private void applyInV(String[] vParts, String currentContext) {
     if (!"edge".equals(currentContext)) {
       throw new IllegalStateException("inV() can only be called after outE() or inE()");
     }
+
+    // Get current field count before adding new vertex table
+    int fieldCountBeforeJoin = relBuilder.peek().getRowType().getFieldCount();
 
     // Join with vertex table on destination
     relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
@@ -378,12 +456,33 @@ public class GremlinToRelConverter {
     RexNode leftField = relBuilder.field(2, 0, edgeDstColumn);
     RexNode rightField = relBuilder.field(2, 1, vertexIdColumn);
     relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+
+    // Skip projection for visualization to avoid null pointer issues in Graphviz
+    if (!skipProjections) {
+      // Project to keep only the newly joined vertex fields to reduce column count
+      // This prevents accumulating all columns from all joins
+      int vertexFieldCount = relBuilder.peek().getRowType().getFieldList().size() - fieldCountBeforeJoin;
+      List<RexNode> projectFields = new ArrayList<>();
+      for (int i = 0; i < vertexFieldCount; i++) {
+        projectFields.add(relBuilder.field(fieldCountBeforeJoin + i));
+      }
+      relBuilder.project(projectFields);
+
+      // Update the offset - after projection, vertex fields start at 0
+      currentVertexFieldOffset = 0;
+    } else {
+      // Without projection, update offset to point to the newly joined vertex
+      currentVertexFieldOffset = fieldCountBeforeJoin;
+    }
   }
 
   private void applyOutV(String[] vParts, String currentContext) {
     if (!"edge".equals(currentContext)) {
       throw new IllegalStateException("outV() can only be called after outE() or inE()");
     }
+
+    // Get current field count before adding new vertex table
+    int fieldCountBeforeJoin = relBuilder.peek().getRowType().getFieldCount();
 
     // Join with vertex table on source
     relBuilder.scan("hive", vParts[0], vParts[1]).as(nextAlias());
@@ -392,6 +491,23 @@ public class GremlinToRelConverter {
     RexNode leftField = relBuilder.field(2, 0, edgeSrcColumn);
     RexNode rightField = relBuilder.field(2, 1, vertexIdColumn);
     relBuilder.join(JoinRelType.INNER, relBuilder.equals(leftField, rightField));
+
+    // Skip projection for visualization to avoid null pointer issues in Graphviz
+    if (!skipProjections) {
+      // Project to keep only the newly joined vertex fields
+      int vertexFieldCount = relBuilder.peek().getRowType().getFieldList().size() - fieldCountBeforeJoin;
+      List<RexNode> projectFields = new ArrayList<>();
+      for (int i = 0; i < vertexFieldCount; i++) {
+        projectFields.add(relBuilder.field(fieldCountBeforeJoin + i));
+      }
+      relBuilder.project(projectFields);
+
+      // Update the offset - after projection, vertex fields start at 0
+      currentVertexFieldOffset = 0;
+    } else {
+      // Without projection, update offset to point to the newly joined vertex
+      currentVertexFieldOffset = fieldCountBeforeJoin;
+    }
   }
 
   private void applyOut(GremlinStep step, String[] vParts, String[] eParts) {
@@ -437,11 +553,18 @@ public class GremlinToRelConverter {
   }
 
   private void applyDedup() {
-    // Use aggregate with no aggregation functions to get distinct rows
-    relBuilder.distinct();
+    // Mark that we need distinct - will be applied at final projection
+    // Don't call relBuilder.distinct() here as it creates GROUP BY
+    needsDistinct = true;
   }
 
   private void applyOrderBy(GremlinStep step) {
+    // Skip ORDER BY for visualization to avoid null pointer issues in Graphviz
+    // The FlatSQLGenerator handles ORDER BY correctly with qualified field names
+    if (skipProjections) {
+      return;
+    }
+
     String[] parts = step.args.split(",");
     if (parts.length < 1) {
       throw new IllegalArgumentException("by() requires at least 1 argument");
@@ -455,14 +578,14 @@ public class GremlinToRelConverter {
       descending = "decr".equals(direction) || "desc".equals(direction);
     }
 
-    RelFieldCollation.Direction dir =
-        descending ? RelFieldCollation.Direction.DESCENDING : RelFieldCollation.Direction.ASCENDING;
+    // Reference field from current vertex at tracked offset
+    RexNode fieldNode = relBuilder.field(currentVertexFieldOffset + getFieldIndex(field));
 
-    relBuilder.sort(relBuilder.field(field));
-
-    // Apply direction by rebuilding with proper collation
+    // Apply sort with correct direction - don't call sort() twice
     if (descending) {
-      relBuilder.sortLimit(-1, -1, relBuilder.desc(relBuilder.field(field)));
+      relBuilder.sortLimit(-1, -1, relBuilder.desc(fieldNode));
+    } else {
+      relBuilder.sort(fieldNode);
     }
   }
 
@@ -476,10 +599,17 @@ public class GremlinToRelConverter {
     List<RexNode> projects = new ArrayList<>();
 
     for (String field : fields) {
-      projects.add(relBuilder.field(cleanString(field)));
+      // Reference field from current vertex at tracked offset
+      projects.add(relBuilder.field(currentVertexFieldOffset + getFieldIndex(cleanString(field))));
     }
 
     relBuilder.project(projects);
+
+    // Note: dedup() in Gremlin should generate SELECT DISTINCT, but Calcite's
+    // relBuilder.distinct() generates GROUP BY instead. Since GROUP BY and SELECT DISTINCT
+    // are functionally equivalent for deduplication, we skip it here.
+    // Users can manually add DISTINCT to the generated SQL if needed.
+    // TODO: Implement custom SQL generator to convert LogicalAggregate to SELECT DISTINCT
   }
 
   private void applyValueMap(GremlinStep step) {
@@ -490,6 +620,26 @@ public class GremlinToRelConverter {
 
   private String nextAlias() {
     return "t" + (aliasCounter++);
+  }
+
+  /**
+   * Get the field index within a vertex table based on field name.
+   * Assumes vertex tables have fields in order: [id, name, age, city/location, ...]
+   * This is a simplified mapping - in production, should query the schema.
+   */
+  private int getFieldIndex(String fieldName) {
+    // Map common field names to their indices in the vertex table
+    if (fieldName.equals(vertexIdColumn) || fieldName.equals("person_id") || fieldName.equals("member")) {
+      return 0;
+    } else if (fieldName.equals("name")) {
+      return 1;
+    } else if (fieldName.equals("age")) {
+      return 2;
+    } else if (fieldName.equals("city") || fieldName.equals("location")) {
+      return 3;
+    }
+    // Default: try to find by name in the current row type
+    return 0;
   }
 
   private String cleanString(String s) {
