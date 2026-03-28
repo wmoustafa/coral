@@ -107,7 +107,13 @@ public class SubstringRegexTransformer implements DomainTransformer {
     }
 
     // Create positional constraint: ^.{startIdx}(outputPattern).*$
-    String inputRegex = String.format("^.{%d}(%s).*$", startIdx, patternWithoutAnchors);
+    String inputRegex;
+    if (startIdx == 0) {
+      // Simplify when starting at position 0
+      inputRegex = String.format("^(%s).*$", patternWithoutAnchors);
+    } else {
+      inputRegex = String.format("^.{%d}(%s).*$", startIdx, patternWithoutAnchors);
+    }
 
     return new RegexDomain(inputRegex);
   }

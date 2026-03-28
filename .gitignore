@@ -19,3 +19,5 @@ ligradle
 *.patch
 */metastore_db
 .pyc
+${coral.service.test.dir}/
+**/coral/service/
