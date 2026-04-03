@@ -1,5 +1,5 @@
 /**
- * Copyright 2022-2023 LinkedIn Corporation. All rights reserved.
+ * Copyright 2022-2026 LinkedIn Corporation. All rights reserved.
  * Licensed under the BSD-2 Clause license.
  * See LICENSE in the project root for license information.
  */
@@ -24,7 +24,11 @@ import static com.linkedin.coral.coralservice.utils.CoralProvider.*;
 public class VisualizationUtils {
 
   public static File getImageDir() {
-    return new File(System.getProperty("java.io.tmpdir") + "/images" + UUID.randomUUID());
+    File imageDir = new File(System.getProperty("java.io.tmpdir") + "/coral-service-images");
+    if (!imageDir.exists()) {
+      imageDir.mkdirs();
+    }
+    return imageDir;
   }
 
   public ArrayList<UUID> generateIRVisualizations(String query, String sourceLanguage, File imageDir,

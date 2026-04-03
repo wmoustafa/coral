@@ -80,6 +80,13 @@ export default function NavBar() {
                   >
                     Translation
                   </Link>
+                  <Link
+                    href='/gremlin'
+                    className='bg-gray-900 text-white rounded-md px-3 py-2 text-sm font-medium'
+                    aria-current='page'
+                  >
+                    Gremlin
+                  </Link>
                 </div>
               </div>
             </div>
@@ -101,6 +108,13 @@ export default function NavBar() {
               aria-current='page'
             >
               Translation
+            </Link>
+            <Link
+              href='/gremlin'
+              className='text-gray-300 hover:bg-gray-700 hover:text-white block rounded-md px-3 py-2 text-base font-medium'
+              aria-current='page'
+            >
+              Gremlin
             </Link>
           </div>
         </div>
