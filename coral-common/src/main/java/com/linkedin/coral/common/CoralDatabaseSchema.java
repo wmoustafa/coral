@@ -107,7 +107,10 @@ public class CoralDatabaseSchema implements Schema {
       }
     }
 
-    return null;
+    // Fallback for plain CoralTable implementations that don't carry Hive/Iceberg-specific
+    // metadata (e.g. an in-memory catalog used by tests). The adapter exposes the schema
+    // via the Coral type system; execution-side hooks throw.
+    return new GenericCoralTableAdapter(coralTable);
   }
 
   /**

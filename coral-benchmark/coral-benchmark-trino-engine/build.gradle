@@ -1,0 +1,11 @@
+apply plugin: 'java-library'
+
+dependencies {
+  api project(path: ':coral-benchmark')
+
+  implementation 'io.trino:trino-main:411'
+  implementation 'io.trino:trino-memory:411'
+  implementation 'io.trino:trino-spi:411'
+  implementation 'io.trino:trino-testing:411'
+  implementation 'com.google.guava:guava:31.1-jre'
+}

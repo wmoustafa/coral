@@ -1,0 +1,58 @@
+apply plugin: 'java-library'
+
+// One configuration per plugin so Gradle resolves each plugin's transitive dependency
+// tree INDEPENDENTLY. There is no cross-configuration conflict resolution, which is what
+// lets Spark 3.5's deps (Jackson 2.15, log4j 1.x binding, Avatica via Coral) and Trino
+// 411's deps (Jackson 2.14, log4j-over-slf4j, its own Calcite/Avatica) coexist — they
+// only meet inside the runtime PluginClassLoader, where each plugin sees only its own
+// jars.
+configurations {
+  sparkDialectPlugin
+  sparkEnginePlugin
+  trinoDialectPlugin
+  trinoEnginePlugin
+}
+
+// The shaded LinkedIn Calcite jar bundles un-relocated org.codehaus.commons.compiler.*
+// classes. These clash with the plugin's own commons-compiler dep (different signer
+// info) and they're already in the parent loader anyway — strip them from every plugin
+// classpath. Same goes for everything else that's part of the shared SPI / parent loader
+// surface: coral-common's transitive Hive metastore tree, Iceberg, etc.
+[configurations.sparkDialectPlugin, configurations.sparkEnginePlugin,
+    configurations.trinoDialectPlugin, configurations.trinoEnginePlugin].each {
+  it.exclude group: 'com.linkedin.calcite'
+  it.exclude group: 'com.linkedin.coral', module: 'coral-common'
+  it.exclude group: 'com.linkedin.coral', module: 'coral-benchmark'
+}
+
+dependencies {
+  // Test JVM (parent loader) has only the SPI and Coral common. Engine and dialect
+  // runtimes never appear on the test compile/runtime classpath.
+  testImplementation project(path: ':coral-benchmark')
+
+  sparkDialectPlugin project(path: ':coral-benchmark:coral-benchmark-spark-dialect')
+  sparkEnginePlugin project(path: ':coral-benchmark:coral-benchmark-spark-engine')
+  trinoDialectPlugin project(path: ':coral-benchmark:coral-benchmark-trino-dialect')
+  trinoEnginePlugin project(path: ':coral-benchmark:coral-benchmark-trino-engine')
+}
+
+test {
+  // Hand each plugin's resolved classpath to the test JVM via a system property; the
+  // test code parses these into URL lists and feeds them to TranslationTestSuite.
+  systemProperty 'coral.benchmark.plugin.spark.dialect', configurations.sparkDialectPlugin.asPath
+  systemProperty 'coral.benchmark.plugin.spark.engine', configurations.sparkEnginePlugin.asPath
+  systemProperty 'coral.benchmark.plugin.trino.dialect', configurations.trinoDialectPlugin.asPath
+  systemProperty 'coral.benchmark.plugin.trino.engine', configurations.trinoEnginePlugin.asPath
+
+  if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_17)) {
+    jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang.invoke=ALL-UNNAMED',
+        '--add-opens=java.base/java.lang.reflect=ALL-UNNAMED',
+        '--add-opens=java.base/java.io=ALL-UNNAMED',
+        '--add-opens=java.base/java.util=ALL-UNNAMED',
+        '--add-opens=java.base/java.util.concurrent=ALL-UNNAMED',
+        '--add-opens=java.base/java.net=ALL-UNNAMED',
+        '--add-opens=java.base/sun.security.action=ALL-UNNAMED'
+  }
+}

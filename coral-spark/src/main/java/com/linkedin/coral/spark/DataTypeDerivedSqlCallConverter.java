@@ -12,6 +12,7 @@ import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.util.SqlShuttle;
 
 import com.linkedin.coral.common.HiveMetastoreClient;
+import com.linkedin.coral.common.catalog.CoralCatalog;
 import com.linkedin.coral.common.transformers.SqlCallTransformers;
 import com.linkedin.coral.common.utils.TypeDerivationUtil;
 import com.linkedin.coral.hive.hive2rel.HiveToRelConverter;
@@ -35,6 +36,14 @@ public class DataTypeDerivedSqlCallConverter extends SqlShuttle {
   public DataTypeDerivedSqlCallConverter(HiveMetastoreClient mscClient, SqlNode topSqlNode,
       Set<SparkUDFInfo> sparkUDFInfos) {
     toRelConverter = new HiveToRelConverter(mscClient);
+    typeDerivationUtil = new TypeDerivationUtil(toRelConverter.getSqlValidator(), topSqlNode);
+    operatorTransformerList =
+        SqlCallTransformers.of(new ExtractUnionFunctionTransformer(typeDerivationUtil, sparkUDFInfos));
+  }
+
+  public DataTypeDerivedSqlCallConverter(CoralCatalog catalog, SqlNode topSqlNode,
+      Set<SparkUDFInfo> sparkUDFInfos) {
+    toRelConverter = new HiveToRelConverter(catalog);
     typeDerivationUtil = new TypeDerivationUtil(toRelConverter.getSqlValidator(), topSqlNode);
     operatorTransformerList =
         SqlCallTransformers.of(new ExtractUnionFunctionTransformer(typeDerivationUtil, sparkUDFInfos));

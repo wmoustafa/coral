@@ -1,0 +1,14 @@
+apply plugin: 'java-library'
+
+dependencies {
+  api project(path: ':coral-benchmark')
+
+  implementation deps.'spark3.5'.'sql'
+}
+
+configurations.all {
+  resolutionStrategy {
+    force 'org.codehaus.janino:janino:3.1.9'
+    force 'org.codehaus.janino:commons-compiler:3.1.9'
+  }
+}

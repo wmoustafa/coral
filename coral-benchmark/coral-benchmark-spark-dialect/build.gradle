@@ -1,0 +1,7 @@
+apply plugin: 'java-library'
+
+dependencies {
+  api project(path: ':coral-benchmark')
+  implementation project(path: ':coral-hive')
+  implementation project(path: ':coral-spark')
+}

@@ -5,20 +5,44 @@
  */
 package com.linkedin.coral.benchmark.suite;
 
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystem;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.ServiceLoader;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.apache.calcite.rel.RelNode;
 
 import com.linkedin.coral.benchmark.comparison.ComparisonConfig;
+import com.linkedin.coral.benchmark.comparison.ComparisonResult;
+import com.linkedin.coral.benchmark.comparison.ResultSetComparator;
+import com.linkedin.coral.benchmark.data.ExplainResult;
+import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
+import com.linkedin.coral.benchmark.plugin.PluginRegistry;
 import com.linkedin.coral.benchmark.spi.Dialect;
 import com.linkedin.coral.benchmark.spi.DialectPlugin;
 import com.linkedin.coral.benchmark.spi.DialectPluginProvider;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.benchmark.spi.VerificationLevel;
 import com.linkedin.coral.common.catalog.CoralCatalog;
+import com.linkedin.coral.common.catalog.CoralTable;
+import com.linkedin.coral.common.types.StructType;
 
 
 /**
@@ -124,14 +148,171 @@ public final class TranslationTestSuite {
    * @return the test report with per-query results and aggregate statistics
    */
   public TestReport run() {
-    // Implementation will:
-    // 1. Discover/load .sql files from queryDir
-    // 2. Start engines if needed (EXPLAIN or RESULT_SET level)
-    // 3. For RESULT_SET: create tables and load test data into both engines
-    // 4. For each query: translate, verify at each level up to requested, collect result
-    // 5. Stop engines
-    // 6. Build and return TestReport
-    throw new UnsupportedOperationException("Not yet implemented");
+    List<QueryFile> queryFiles = discoverQueries(queryDir);
+    boolean needSourceEngine = verificationLevel == VerificationLevel.RESULT_SET;
+    boolean needTargetEngine = verificationLevel.ordinal() >= VerificationLevel.EXPLAIN.ordinal();
+
+    List<QueryTestResult> results = new ArrayList<>();
+    try {
+      if (needSourceEngine) {
+        sourceEngine.start();
+      }
+      if (needTargetEngine) {
+        targetEngine.start();
+      }
+
+      if (verificationLevel == VerificationLevel.RESULT_SET) {
+        seedEngines();
+      }
+
+      ResultSetComparator comparator = new ResultSetComparator(comparisonConfig);
+
+      for (QueryFile q : queryFiles) {
+        results.add(runOne(q, comparator));
+      }
+    } finally {
+      if (needSourceEngine && sourceEngine != null) {
+        try {
+          sourceEngine.stop();
+        } catch (RuntimeException ignored) {
+        }
+      }
+      if (needTargetEngine && targetEngine != null) {
+        try {
+          targetEngine.stop();
+        } catch (RuntimeException ignored) {
+        }
+      }
+    }
+
+    return new TestReport(source, target, verificationLevel, results);
+  }
+
+  private QueryTestResult runOne(QueryFile q, ResultSetComparator comparator) {
+    QueryTestResult.Builder b = QueryTestResult.builder(q.name, q.sql, verificationLevel);
+    String translatedSql;
+    try {
+      RelNode rel = sourcePlugin.toRelNode(q.sql);
+      translatedSql = targetPlugin.toDialectSql(rel);
+      b.translatedSql(translatedSql);
+    } catch (Exception e) {
+      return b.status(QueryTestResult.Status.FAIL).failureCategory(QueryTestResult.FailureCategory.TRANSLATION_ERROR)
+          .errorMessage(e.getMessage()).exception(e).build();
+    }
+
+    if (verificationLevel.ordinal() >= VerificationLevel.EXPLAIN.ordinal()) {
+      ExplainResult explain;
+      try {
+        explain = targetEngine.explain(translatedSql);
+      } catch (Exception e) {
+        explain = ExplainResult.failure(e.getMessage(), e);
+      }
+      b.explainResult(explain);
+      if (!explain.isSuccess()) {
+        return b.status(QueryTestResult.Status.FAIL).failureCategory(QueryTestResult.FailureCategory.EXPLAIN_FAILURE)
+            .errorMessage(explain.getErrorMessage().orElse("EXPLAIN failed"))
+            .exception(explain.getException().orElse(null)).build();
+      }
+    }
+
+    if (verificationLevel == VerificationLevel.RESULT_SET) {
+      ResultSet sourceRs;
+      ResultSet targetRs;
+      try {
+        sourceRs = sourceEngine.execute(q.sql);
+        targetRs = targetEngine.execute(translatedSql);
+      } catch (Exception e) {
+        return b.status(QueryTestResult.Status.FAIL).failureCategory(QueryTestResult.FailureCategory.RESULT_MISMATCH)
+            .errorMessage("Execution failed: " + e.getMessage()).exception(e).build();
+      }
+      ComparisonResult cmp = comparator.compare(sourceRs, targetRs);
+      b.comparisonResult(cmp);
+      if (!cmp.isEquivalent()) {
+        return b.status(QueryTestResult.Status.FAIL).failureCategory(QueryTestResult.FailureCategory.RESULT_MISMATCH)
+            .errorMessage(cmp.getSummary()).build();
+      }
+    }
+
+    return b.status(QueryTestResult.Status.PASS).build();
+  }
+
+  private void seedEngines() {
+    for (Map.Entry<String, RowSet> e : testData.entrySet()) {
+      String qname = e.getKey();
+      int dot = qname.indexOf('.');
+      if (dot <= 0 || dot == qname.length() - 1) {
+        throw new IllegalStateException("Test data key must be 'namespace.table', got: " + qname);
+      }
+      String ns = qname.substring(0, dot);
+      String table = qname.substring(dot + 1);
+      CoralTable ct = catalog.getTable(ns, table);
+      if (ct == null) {
+        throw new IllegalStateException("Catalog does not contain table " + qname);
+      }
+      StructType schema = (StructType) ct.getSchema();
+      sourceEngine.createTable(ns, table, schema);
+      targetEngine.createTable(ns, table, schema);
+      sourceEngine.loadData(ns, table, e.getValue());
+      targetEngine.loadData(ns, table, e.getValue());
+    }
+  }
+
+  private static List<QueryFile> discoverQueries(String queryDir) {
+    ClassLoader cl = Thread.currentThread().getContextClassLoader();
+    if (cl == null) {
+      cl = TranslationTestSuite.class.getClassLoader();
+    }
+    URL url = cl.getResource(queryDir);
+    if (url == null) {
+      throw new IllegalStateException("Query directory not found on classpath: " + queryDir);
+    }
+    try {
+      URI uri = url.toURI();
+      FileSystem jarFs = null;
+      Path dir;
+      try {
+        if ("jar".equals(uri.getScheme())) {
+          try {
+            dir = Paths.get(uri);
+          } catch (java.nio.file.FileSystemNotFoundException fsnfe) {
+            jarFs = FileSystems.newFileSystem(uri, Collections.emptyMap());
+            dir = Paths.get(uri);
+          }
+        } else {
+          dir = Paths.get(uri);
+        }
+        List<QueryFile> out = new ArrayList<>();
+        try (Stream<Path> s = Files.list(dir)) {
+          List<Path> files =
+              s.filter(p -> p.getFileName().toString().endsWith(".sql")).sorted().collect(Collectors.toList());
+          for (Path p : files) {
+            String name = p.getFileName().toString().replaceFirst("\\.sql$", "");
+            String sql = new String(Files.readAllBytes(p), StandardCharsets.UTF_8).trim();
+            if (sql.endsWith(";")) {
+              sql = sql.substring(0, sql.length() - 1).trim();
+            }
+            out.add(new QueryFile(name, sql));
+          }
+        }
+        return out;
+      } finally {
+        if (jarFs != null) {
+          jarFs.close();
+        }
+      }
+    } catch (URISyntaxException | IOException ex) {
+      throw new UncheckedIOException(new IOException("Failed to enumerate " + queryDir, ex));
+    }
+  }
+
+  private static final class QueryFile {
+    final String name;
+    final String sql;
+
+    QueryFile(String name, String sql) {
+      this.name = name;
+      this.sql = sql;
+    }
   }
 
   /**
@@ -167,6 +348,9 @@ public final class TranslationTestSuite {
     private DialectPluginProvider targetPluginProvider;
     private EnginePlugin sourceEngine;
     private EnginePlugin targetEngine;
+    private final Map<Dialect, List<java.net.URL>> dialectJars = new HashMap<>();
+    private final Map<Dialect, List<java.net.URL>> engineJars = new HashMap<>();
+    private PluginRegistry pluginRegistry;
     private final Map<String, RowSet> testData = new HashMap<>();
     private ComparisonConfig comparisonConfig = ComparisonConfig.defaults();
 
@@ -280,6 +464,54 @@ public final class TranslationTestSuite {
     }
 
     /**
+     * Registers the runtime classpath for a dialect plugin. When set, the framework
+     * materializes that dialect's plugin inside an isolated {@link PluginRegistry}
+     * classloader instead of using a directly-injected provider. This is what lets
+     * Spark and Trino plugins coexist without their conflicting transitive deps
+     * (Jackson, Avatica, SLF4J, runtime jars) colliding on a single classpath.
+     *
+     * @param dialect the dialect the jars provide
+     * @param jars    the plugin module's full runtime classpath (jar URLs)
+     * @return this builder
+     */
+    public Builder dialectPluginJars(Dialect dialect, List<java.net.URL> jars) {
+      Objects.requireNonNull(dialect);
+      Objects.requireNonNull(jars);
+      this.dialectJars.put(dialect, jars);
+      return this;
+    }
+
+    /**
+     * Registers the runtime classpath for an engine plugin. The engine is instantiated
+     * inside an isolated {@link PluginRegistry} classloader via its
+     * {@link com.linkedin.coral.benchmark.spi.EnginePluginProvider}, and every call into
+     * the engine swaps the thread context classloader so Spark/Trino's internal lookups
+     * land inside their own jars.
+     *
+     * @param dialect the dialect the engine runs natively
+     * @param jars    the engine module's full runtime classpath (jar URLs)
+     * @return this builder
+     */
+    public Builder enginePluginJars(Dialect dialect, List<java.net.URL> jars) {
+      Objects.requireNonNull(dialect);
+      Objects.requireNonNull(jars);
+      this.engineJars.put(dialect, jars);
+      return this;
+    }
+
+    /**
+     * Overrides the {@link PluginRegistry} used to load isolated plugins. By default a
+     * registry rooted at {@code TranslationTestSuite}'s own classloader is used.
+     *
+     * @param registry the registry
+     * @return this builder
+     */
+    public Builder pluginRegistry(PluginRegistry registry) {
+      this.pluginRegistry = Objects.requireNonNull(registry);
+      return this;
+    }
+
+    /**
      * Adds test data for a table. The key is the fully qualified table name
      * (e.g., "db.users"). Required for {@link VerificationLevel#RESULT_SET}.
      *
@@ -332,28 +564,57 @@ public final class TranslationTestSuite {
       Objects.requireNonNull(queryDir, "Query directory is required");
       Objects.requireNonNull(verificationLevel, "Verification level is required");
 
-      if (verificationLevel.ordinal() >= VerificationLevel.EXPLAIN.ordinal() && targetEngine == null) {
-        throw new IllegalStateException("Target engine is required for verification level " + verificationLevel);
+      boolean needTargetEngine = verificationLevel.ordinal() >= VerificationLevel.EXPLAIN.ordinal();
+      boolean needSourceEngine = verificationLevel == VerificationLevel.RESULT_SET;
+
+      if (needTargetEngine && targetEngine == null && !engineJars.containsKey(target)) {
+        throw new IllegalStateException(
+            "Target engine is required for verification level " + verificationLevel + " — supply one via "
+                + "targetEngine(EnginePlugin) or enginePluginJars(target, jars).");
+      }
+      if (needSourceEngine && sourceEngine == null && !engineJars.containsKey(source)) {
+        throw new IllegalStateException(
+            "Source engine is required for RESULT_SET verification — supply one via "
+                + "sourceEngine(EnginePlugin) or enginePluginJars(source, jars).");
+      }
+      if (verificationLevel == VerificationLevel.RESULT_SET && testData.isEmpty()) {
+        throw new IllegalStateException("Test data is required for RESULT_SET verification");
       }
 
-      if (verificationLevel == VerificationLevel.RESULT_SET) {
-        if (sourceEngine == null) {
-          throw new IllegalStateException("Source engine is required for RESULT_SET verification");
-        }
-        if (testData.isEmpty()) {
-          throw new IllegalStateException("Test data is required for RESULT_SET verification");
-        }
+      PluginRegistry registry = pluginRegistry;
+      if (registry == null && (!dialectJars.isEmpty() || !engineJars.isEmpty())) {
+        registry = new PluginRegistry(TranslationTestSuite.class.getClassLoader());
       }
 
-      DialectPluginProvider resolvedSourceProvider =
-          sourcePluginProvider != null ? sourcePluginProvider : resolveProvider(source);
-      DialectPluginProvider resolvedTargetProvider =
-          targetPluginProvider != null ? targetPluginProvider : resolveProvider(target);
+      DialectPlugin resolvedSourcePlugin = resolveDialectPlugin(source, registry, sourcePluginProvider);
+      DialectPlugin resolvedTargetPlugin = resolveDialectPlugin(target, registry, targetPluginProvider);
 
-      DialectPlugin sourcePlugin = resolvedSourceProvider.create(catalog);
-      DialectPlugin targetPlugin = resolvedTargetProvider.create(catalog);
+      EnginePlugin resolvedSourceEngine = sourceEngine;
+      if (needSourceEngine && resolvedSourceEngine == null) {
+        resolvedSourceEngine = registry.loadEnginePlugin(source, engineJars.get(source));
+      }
+      EnginePlugin resolvedTargetEngine = targetEngine;
+      if (needTargetEngine && resolvedTargetEngine == null) {
+        resolvedTargetEngine = registry.loadEnginePlugin(target, engineJars.get(target));
+      }
+      this.sourceEngine = resolvedSourceEngine;
+      this.targetEngine = resolvedTargetEngine;
 
-      return new TranslationTestSuite(this, sourcePlugin, targetPlugin);
+      return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin);
+    }
+
+    private DialectPlugin resolveDialectPlugin(Dialect dialect, PluginRegistry registry,
+        DialectPluginProvider explicitProvider) {
+      if (explicitProvider != null) {
+        return explicitProvider.create(catalog);
+      }
+      if (dialectJars.containsKey(dialect)) {
+        if (registry == null) {
+          registry = new PluginRegistry(TranslationTestSuite.class.getClassLoader());
+        }
+        return registry.loadDialectPlugin(dialect, dialectJars.get(dialect), catalog);
+      }
+      return resolveProvider(dialect).create(catalog);
     }
 
     private static DialectPluginProvider resolveProvider(Dialect dialect) {
@@ -363,8 +624,8 @@ public final class TranslationTestSuite {
         }
       }
       throw new IllegalStateException("No DialectPluginProvider registered for dialect " + dialect
-          + ". Set one explicitly via sourcePluginProvider/targetPluginProvider, or add a " + "META-INF/services/"
-          + DialectPluginProvider.class.getName() + " entry.");
+          + ". Set one explicitly via sourcePluginProvider/targetPluginProvider, register the plugin's classpath via "
+          + "dialectPluginJars(...), or add a META-INF/services/" + DialectPluginProvider.class.getName() + " entry.");
     }
   }
 }

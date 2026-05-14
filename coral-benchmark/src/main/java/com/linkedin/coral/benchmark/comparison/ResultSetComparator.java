@@ -5,6 +5,11 @@
  */
 package com.linkedin.coral.benchmark.comparison;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Objects;
 
 import com.linkedin.coral.benchmark.data.ResultSet;
@@ -57,14 +62,75 @@ public final class ResultSetComparator {
     Objects.requireNonNull(source, "Source result set cannot be null");
     Objects.requireNonNull(target, "Target result set cannot be null");
 
-    // Implementation will:
-    // 1. Compare schemas (column count, types with optional widening)
-    // 2. Compare row counts
-    // 3. Compare row contents (ordered or as multisets, per config)
-    //    - Apply floating-point epsilon
-    //    - Apply NULL equivalence
-    //    - Normalize timestamp precision
-    throw new UnsupportedOperationException("Not yet implemented");
+    int sourceCols = source.getSchema().getFields().size();
+    int targetCols = target.getSchema().getFields().size();
+    if (sourceCols != targetCols) {
+      return ComparisonResult.mismatch(
+          "Column count mismatch: source=" + sourceCols + ", target=" + targetCols, Arrays.asList());
+    }
+
+    if (source.size() != target.size()) {
+      return ComparisonResult.mismatch("Row count mismatch: source=" + source.size() + ", target=" + target.size(),
+          Arrays.asList());
+    }
+
+    List<Object[]> sourceRows = new ArrayList<>(source.getRows());
+    List<Object[]> targetRows = new ArrayList<>(target.getRows());
+
+    if (!config.isOrderedComparison()) {
+      Comparator<Object[]> rowComparator = (a, b) -> Arrays.deepToString(a).compareTo(Arrays.deepToString(b));
+      sourceRows.sort(rowComparator);
+      targetRows.sort(rowComparator);
+    }
+
+    List<String> diffs = new ArrayList<>();
+    for (int i = 0; i < sourceRows.size(); i++) {
+      Object[] sourceRow = sourceRows.get(i);
+      Object[] targetRow = targetRows.get(i);
+      for (int j = 0; j < sourceCols; j++) {
+        if (!cellsEqual(sourceRow[j], targetRow[j])) {
+          diffs.add("Row " + i + ", column " + j + ": source=" + repr(sourceRow[j]) + ", target=" + repr(targetRow[j]));
+        }
+      }
+    }
+
+    if (diffs.isEmpty()) {
+      return ComparisonResult.equivalent();
+    }
+    return ComparisonResult.mismatch(diffs.size() + " cell mismatch(es)", diffs);
+  }
+
+  private boolean cellsEqual(Object a, Object b) {
+    if (a == null || b == null) {
+      return a == null && b == null;
+    }
+    if (a instanceof Number && b instanceof Number) {
+      double da = ((Number) a).doubleValue();
+      double db = ((Number) b).doubleValue();
+      if (a instanceof BigDecimal && b instanceof BigDecimal) {
+        return ((BigDecimal) a).compareTo((BigDecimal) b) == 0;
+      }
+      if (a instanceof Float || a instanceof Double || b instanceof Float || b instanceof Double) {
+        return Math.abs(da - db) <= config.getFloatingPointEpsilon();
+      }
+      if (config.isAllowTypeWidening()) {
+        return ((Number) a).longValue() == ((Number) b).longValue();
+      }
+    }
+    if (a.getClass().isArray() && b.getClass().isArray()) {
+      return Arrays.deepEquals((Object[]) a, (Object[]) b);
+    }
+    return Objects.equals(a, b);
+  }
+
+  private static String repr(Object v) {
+    if (v == null) {
+      return "null";
+    }
+    if (v.getClass().isArray()) {
+      return Arrays.deepToString((Object[]) v);
+    }
+    return v.toString();
   }
 
   /**

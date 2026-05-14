@@ -24,6 +24,7 @@ import org.apache.hadoop.hive.metastore.api.Table;
 import com.linkedin.coral.common.HiveMetastoreClient;
 import com.linkedin.coral.common.HiveRelBuilder;
 import com.linkedin.coral.common.ToRelConverter;
+import com.linkedin.coral.common.catalog.CoralCatalog;
 import com.linkedin.coral.hive.hive2rel.CoralConvertletTable;
 import com.linkedin.coral.hive.hive2rel.DaliOperatorTable;
 import com.linkedin.coral.hive.hive2rel.HiveSqlValidator;
@@ -59,6 +60,10 @@ public class TrinoToRelConverter extends ToRelConverter {
 
   public TrinoToRelConverter(Map<String, Map<String, List<String>>> localMetaStore) {
     super(localMetaStore);
+  }
+
+  public TrinoToRelConverter(CoralCatalog catalog) {
+    super(catalog);
   }
 
   @Override

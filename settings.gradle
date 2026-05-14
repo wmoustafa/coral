@@ -22,7 +22,7 @@ include 'coral-visualization'
 include 'shading'
 
 // Sub-modules: only include directories that have a build.gradle
-['shading'].each { module ->
+['shading', 'coral-benchmark'].each { module ->
   file(module).eachDir { submodule ->
     if (!submodule.name.startsWith('.') && new File(submodule, 'build.gradle').exists()) {
       include "${module}:${submodule.name}"

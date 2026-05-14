@@ -20,6 +20,7 @@ import org.apache.calcite.sql.SqlSelect;
 
 import com.linkedin.coral.com.google.common.collect.ImmutableList;
 import com.linkedin.coral.common.HiveMetastoreClient;
+import com.linkedin.coral.common.catalog.CoralCatalog;
 import com.linkedin.coral.spark.containers.SparkRelInfo;
 import com.linkedin.coral.spark.containers.SparkUDFInfo;
 import com.linkedin.coral.spark.dialect.SparkSqlDialect;
@@ -84,6 +85,24 @@ public class CoralSpark {
   }
 
   /**
+   * Users use this function as the main API for getting CoralSpark instance when working with
+   * the unified {@link CoralCatalog} abstraction instead of a legacy {@link HiveMetastoreClient}.
+   *
+   * @param irRelNode A IR RelNode for which CoralSpark will be constructed.
+   * @param coralCatalog the catalog providing table metadata for type derivation.
+   * @return [[CoralSpark]]
+   */
+  public static CoralSpark create(RelNode irRelNode, CoralCatalog coralCatalog) {
+    SparkRelInfo sparkRelInfo = IRRelToSparkRelTransformer.transform(irRelNode);
+    Set<SparkUDFInfo> sparkUDFInfos = sparkRelInfo.getSparkUDFInfos();
+    RelNode sparkRelNode = sparkRelInfo.getSparkRelNode();
+    SqlNode sparkSqlNode = constructSparkSqlNode(sparkRelNode, sparkUDFInfos, coralCatalog);
+    String sparkSQL = constructSparkSQL(sparkSqlNode);
+    List<String> baseTables = constructBaseTables(sparkRelNode);
+    return new CoralSpark(baseTables, ImmutableList.copyOf(sparkUDFInfos), sparkSQL, null, sparkSqlNode);
+  }
+
+  /**
    * Users use this function as the main API for getting CoralSpark instance.
    * This should be used when user need to align the Coral-spark translated SQL
    * with Coral-schema output schema
@@ -121,6 +140,19 @@ public class CoralSpark {
 
     SqlNode coralSqlNodeWithRelDataTypeDerivedConversions =
         coralSqlNode.accept(new DataTypeDerivedSqlCallConverter(hmsClient, coralSqlNode, sparkUDFInfos));
+
+    SqlNode sparkSqlNode = coralSqlNodeWithRelDataTypeDerivedConversions
+        .accept(new CoralSqlNodeToSparkSqlNodeConverter()).accept(new CoralToSparkSqlCallConverter(sparkUDFInfos));
+    return sparkSqlNode.accept(new SparkSqlRewriter());
+  }
+
+  private static SqlNode constructSparkSqlNode(RelNode sparkRelNode, Set<SparkUDFInfo> sparkUDFInfos,
+      CoralCatalog coralCatalog) {
+    CoralRelToSqlNodeConverter rel2sql = new CoralRelToSqlNodeConverter();
+    SqlNode coralSqlNode = rel2sql.convert(sparkRelNode);
+
+    SqlNode coralSqlNodeWithRelDataTypeDerivedConversions =
+        coralSqlNode.accept(new DataTypeDerivedSqlCallConverter(coralCatalog, coralSqlNode, sparkUDFInfos));
 
     SqlNode sparkSqlNode = coralSqlNodeWithRelDataTypeDerivedConversions
         .accept(new CoralSqlNodeToSparkSqlNodeConverter()).accept(new CoralToSparkSqlCallConverter(sparkUDFInfos));
