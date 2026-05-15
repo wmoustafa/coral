@@ -31,7 +31,7 @@ public final class TrinoSqlDialectPlugin implements DialectPlugin {
 
   @Override
   public Dialect dialect() {
-    return Dialect.TRINO;
+    return Dialect.TRINO_SQL;
   }
 
   @Override

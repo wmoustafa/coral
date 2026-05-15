@@ -35,7 +35,7 @@ public final class SparkSqlDialectPlugin implements DialectPlugin {
 
   @Override
   public Dialect dialect() {
-    return Dialect.SPARK;
+    return Dialect.SPARK_SQL;
   }
 
   @Override

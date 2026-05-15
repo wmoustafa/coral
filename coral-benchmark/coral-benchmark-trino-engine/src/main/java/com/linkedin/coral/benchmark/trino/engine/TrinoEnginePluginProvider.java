@@ -18,7 +18,7 @@ public final class TrinoEnginePluginProvider implements EnginePluginProvider {
 
   @Override
   public Dialect dialect() {
-    return Dialect.TRINO;
+    return Dialect.TRINO_SQL;
   }
 
   @Override

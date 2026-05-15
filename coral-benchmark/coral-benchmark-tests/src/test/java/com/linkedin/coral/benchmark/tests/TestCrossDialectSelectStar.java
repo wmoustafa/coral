@@ -39,7 +39,7 @@ public class TestCrossDialectSelectStar {
 
   @DataProvider(name = "directions")
   public Object[][] directions() {
-    return new Object[][] { { Dialect.SPARK, Dialect.TRINO }, { Dialect.TRINO, Dialect.SPARK } };
+    return new Object[][] { { Dialect.SPARK_SQL, Dialect.TRINO_SQL }, { Dialect.TRINO_SQL, Dialect.SPARK_SQL } };
   }
 
   /**
@@ -105,10 +105,10 @@ public class TestCrossDialectSelectStar {
       RowSet users) {
     return TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
         .verificationLevel(VerificationLevel.RESULT_SET)
-        .dialectPluginJars(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.sql.dialect"))
-        .dialectPluginJars(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.sql.dialect"))
-        .enginePluginJars(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.engine"))
-        .enginePluginJars(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.engine"))
+        .dialectPluginJars(Dialect.SPARK_SQL, classpathOf("coral.benchmark.plugin.spark.sql.dialect"))
+        .dialectPluginJars(Dialect.TRINO_SQL, classpathOf("coral.benchmark.plugin.trino.sql.dialect"))
+        .enginePluginJars(Dialect.SPARK_SQL, classpathOf("coral.benchmark.plugin.spark.engine"))
+        .enginePluginJars(Dialect.TRINO_SQL, classpathOf("coral.benchmark.plugin.trino.engine"))
         .testData("default.users", users);
   }
 

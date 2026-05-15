@@ -57,8 +57,8 @@ import com.linkedin.coral.common.types.StructType;
  * <p>Usage (Level 1 - translation only):
  * <pre>{@code
  * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.HIVE)
- *     .target(Dialect.TRINO)
+ *     .source(Dialect.HIVE_SQL)
+ *     .target(Dialect.TRINO_SQL)
  *     .catalog(catalog)
  *     .queryDir("queries/hive")
  *     .verificationLevel(VerificationLevel.TRANSLATION)
@@ -70,8 +70,8 @@ import com.linkedin.coral.common.types.StructType;
  * <p>Usage (Level 2 - EXPLAIN):
  * <pre>{@code
  * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.HIVE)
- *     .target(Dialect.TRINO)
+ *     .source(Dialect.HIVE_SQL)
+ *     .target(Dialect.TRINO_SQL)
  *     .catalog(catalog)
  *     .queryDir("queries/hive")
  *     .verificationLevel(VerificationLevel.EXPLAIN)
@@ -84,8 +84,8 @@ import com.linkedin.coral.common.types.StructType;
  * <p>Usage (Level 3 - result set comparison):
  * <pre>{@code
  * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.HIVE)
- *     .target(Dialect.TRINO)
+ *     .source(Dialect.HIVE_SQL)
+ *     .target(Dialect.TRINO_SQL)
  *     .catalog(catalog)
  *     .queryDir("queries/hive")
  *     .verificationLevel(VerificationLevel.RESULT_SET)

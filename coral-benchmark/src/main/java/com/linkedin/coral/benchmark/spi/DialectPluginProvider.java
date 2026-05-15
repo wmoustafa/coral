@@ -22,7 +22,7 @@ import com.linkedin.coral.common.catalog.CoralCatalog;
  * <p>Typical implementation:
  * <pre>{@code
  * public final class HiveDialectPluginProvider implements DialectPluginProvider {
- *     public Dialect dialect() { return Dialect.HIVE; }
+ *     public Dialect dialect() { return Dialect.HIVE_SQL; }
  *     public DialectPlugin create(CoralCatalog catalog) {
  *         return new HiveDialectPlugin(catalog);
  *     }

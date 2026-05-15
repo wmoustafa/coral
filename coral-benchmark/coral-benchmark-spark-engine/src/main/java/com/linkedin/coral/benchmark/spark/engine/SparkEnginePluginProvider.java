@@ -18,7 +18,7 @@ public final class SparkEnginePluginProvider implements EnginePluginProvider {
 
   @Override
   public Dialect dialect() {
-    return Dialect.SPARK;
+    return Dialect.SPARK_SQL;
   }
 
   @Override

@@ -18,7 +18,7 @@ package com.linkedin.coral.benchmark.spi;
  * <p>Typical implementation:
  * <pre>{@code
  * public final class SparkEnginePluginProvider implements EnginePluginProvider {
- *     public Dialect dialect() { return Dialect.SPARK; }
+ *     public Dialect dialect() { return Dialect.SPARK_SQL; }
  *     public EnginePlugin create() { return new SparkEnginePlugin(); }
  * }
  * }</pre>

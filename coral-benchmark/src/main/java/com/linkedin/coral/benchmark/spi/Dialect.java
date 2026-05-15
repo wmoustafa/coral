@@ -13,7 +13,7 @@ package com.linkedin.coral.benchmark.spi;
  * while an {@link EnginePlugin} provides execution capabilities.
  */
 public enum Dialect {
-  HIVE,
-  SPARK,
-  TRINO
+  HIVE_SQL,
+  SPARK_SQL,
+  TRINO_SQL
 }
