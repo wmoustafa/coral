@@ -6,9 +6,7 @@
 package com.linkedin.coral.benchmark.trino.engine;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
 
 import com.google.common.collect.ImmutableMap;
 
@@ -53,10 +51,6 @@ public final class TrinoEnginePlugin implements EnginePlugin {
   private static final String CATALOG = "memory";
 
   private LocalQueryRunner runner;
-  // LocalQueryRunner won't plan bare CREATE TABLE or CREATE SCHEMA — it only handles
-  // CREATE TABLE AS SELECT. We defer the actual table materialization until loadData()
-  // can emit a CTAS that creates the table and inserts the rows together.
-  private final Map<String, StructType> pendingTables = new HashMap<>();
 
   @Override
   public Dialect dialect() {
@@ -74,59 +68,49 @@ public final class TrinoEnginePlugin implements EnginePlugin {
   @Override
   public void createTable(String namespace, String tableName, CoralDataType schema) {
     requireStarted();
-    // Defer materialization until loadData() — see field comment.
-    pendingTables.put(qualified(namespace, tableName), (StructType) schema);
+    if (!(schema instanceof StructType)) {
+      throw new IllegalArgumentException(
+          "createTable: schema for " + qualified(namespace, tableName) + " must be a StructType, got: "
+              + (schema == null ? "null" : schema.getClass().getName()));
+    }
+    // Materialize an empty typed table immediately so the SPI contract holds (table must
+    // be queryable after createTable returns). LocalQueryRunner won't plan bare DDL but
+    // it does plan CTAS, so we emit `CREATE TABLE ... AS SELECT <typed nulls> WHERE 1=0`.
+    runner.execute("CREATE TABLE " + CATALOG + "." + qualified(namespace, tableName) + " AS "
+        + emptyCtasSelect((StructType) schema));
   }
 
   @Override
   public void loadData(String namespace, String tableName, RowSet data) {
     requireStarted();
-    String key = qualified(namespace, tableName);
-    StructType schema = pendingTables.remove(key);
-    if (schema == null) {
-      throw new IllegalStateException("loadData called without prior createTable for " + key);
-    }
     if (data.size() == 0) {
-      // Materialize an empty table by selecting the literals once and filtering them out.
-      runner.execute("CREATE TABLE " + CATALOG + "." + key + " AS " + emptyCtasSelect(schema));
       return;
     }
-    runner.execute("CREATE TABLE " + CATALOG + "." + key + " AS " + valuesCtasSelect(schema, data.getRows()));
-  }
-
-  private static String qualified(String namespace, String tableName) {
-    return namespace + "." + tableName;
-  }
-
-  private String valuesCtasSelect(StructType schema, List<Object[]> rows) {
-    StringBuilder sb = new StringBuilder("SELECT * FROM (VALUES ");
-    for (int rowIdx = 0; rowIdx < rows.size(); rowIdx++) {
+    String key = qualified(namespace, tableName);
+    StructType schema = data.getSchema();
+    StringBuilder sb = new StringBuilder("INSERT INTO ").append(CATALOG).append('.').append(key).append(" VALUES ");
+    for (int rowIdx = 0; rowIdx < data.getRows().size(); rowIdx++) {
       if (rowIdx > 0) {
         sb.append(", ");
       }
-      Object[] row = rows.get(rowIdx);
+      Object[] row = data.getRows().get(rowIdx);
       sb.append('(');
       for (int colIdx = 0; colIdx < row.length; colIdx++) {
         if (colIdx > 0) {
           sb.append(", ");
         }
-        // Cast each literal so the table picks up the right type (VARCHAR sizing in
-        // particular — bare literals would otherwise default to varchar(N) with length
-        // equal to the longest literal).
+        // Cast each literal so VARCHAR sizing and numeric widening match the table's
+        // column types (bare literals would otherwise be varchar(N) with N = literal len).
         sb.append("CAST(").append(literal(row[colIdx], schema.getFields().get(colIdx).getType())).append(" AS ")
             .append(CoralTypeToTrino.toTrinoSqlType(schema.getFields().get(colIdx).getType())).append(')');
       }
       sb.append(')');
     }
-    sb.append(") AS t(");
-    for (int i = 0; i < schema.getFields().size(); i++) {
-      if (i > 0) {
-        sb.append(", ");
-      }
-      sb.append('"').append(schema.getFields().get(i).getName()).append('"');
-    }
-    sb.append(')');
-    return sb.toString();
+    runner.execute(sb.toString());
+  }
+
+  private static String qualified(String namespace, String tableName) {
+    return namespace + "." + tableName;
   }
 
   private String emptyCtasSelect(StructType schema) {
@@ -190,9 +174,10 @@ public final class TrinoEnginePlugin implements EnginePlugin {
 
   private static StructType toCoralSchema(MaterializedResult result) {
     List<Type> types = result.getTypes();
+    List<String> names = result.getColumnNames();
     List<StructField> fields = new ArrayList<>(types.size());
     for (int i = 0; i < types.size(); i++) {
-      String columnName = "_col" + i;
+      String columnName = (names != null && i < names.size() && names.get(i) != null) ? names.get(i) : "_col" + i;
       fields.add(StructField.of(columnName, fromTrinoType(types.get(i))));
     }
     return StructType.of(fields, true);

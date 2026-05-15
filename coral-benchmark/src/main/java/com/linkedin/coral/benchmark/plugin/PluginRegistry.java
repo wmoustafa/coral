@@ -5,7 +5,10 @@
  */
 package com.linkedin.coral.benchmark.plugin;
 
+import java.io.Closeable;
+import java.io.IOException;
 import java.net.URL;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.ServiceLoader;
@@ -31,9 +34,10 @@ import com.linkedin.coral.common.catalog.CoralCatalog;
  * <p>The returned plugin is the parent-loader-visible {@link DialectPlugin} or
  * {@link EnginePlugin} interface; the concrete implementation classes never leak out.
  */
-public final class PluginRegistry {
+public final class PluginRegistry implements Closeable {
 
   private final ClassLoader sharedParent;
+  private final List<PluginClassLoader> openLoaders = new ArrayList<>();
 
   /**
    * Creates a registry rooted at the given shared parent classloader.
@@ -62,11 +66,17 @@ public final class PluginRegistry {
       Thread.currentThread().setContextClassLoader(loader);
       for (DialectPluginProvider provider : ServiceLoader.load(DialectPluginProvider.class, loader)) {
         if (provider.dialect() == dialect) {
+          openLoaders.add(loader);
           return new ContextClassLoaderDialectPlugin(provider.create(catalog), loader);
         }
       }
     } finally {
       Thread.currentThread().setContextClassLoader(previous);
+    }
+    // Provider wasn't found; release the loader we just opened.
+    try {
+      loader.close();
+    } catch (IOException ignored) {
     }
     throw new IllegalStateException("No DialectPluginProvider for " + dialect + " on the supplied classpath ("
         + jars.size() + " jar(s)). Check META-INF/services registration in the plugin module.");
@@ -87,13 +97,38 @@ public final class PluginRegistry {
       Thread.currentThread().setContextClassLoader(loader);
       for (EnginePluginProvider provider : ServiceLoader.load(EnginePluginProvider.class, loader)) {
         if (provider.dialect() == dialect) {
+          openLoaders.add(loader);
           return new ContextClassLoaderEnginePlugin(provider.create(), loader);
         }
       }
     } finally {
       Thread.currentThread().setContextClassLoader(previous);
     }
+    // Provider wasn't found; release the loader we just opened.
+    try {
+      loader.close();
+    } catch (IOException ignored) {
+    }
     throw new IllegalStateException("No EnginePluginProvider for " + dialect + " on the supplied classpath ("
         + jars.size() + " jar(s)). Check META-INF/services registration in the plugin module.");
+  }
+
+  /**
+   * Closes every {@link PluginClassLoader} this registry has opened. Spark, Trino, Hadoop,
+   * and similar engine runtimes install MBeans, thread pools, FileSystem cache entries,
+   * and shutdown hooks that hold their classloader strongly reachable — without this,
+   * each load-then-discard cycle leaks an entire engine runtime. Callers that already
+   * closed individual plugin proxies will see the underlying loader's {@code close()}
+   * called a second time here, which is a no-op.
+   */
+  @Override
+  public void close() {
+    for (PluginClassLoader loader : openLoaders) {
+      try {
+        loader.close();
+      } catch (IOException ignored) {
+      }
+    }
+    openLoaders.clear();
   }
 }

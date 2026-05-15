@@ -5,12 +5,14 @@
  */
 package com.linkedin.coral.benchmark.tests;
 
+import java.io.Closeable;
 import java.io.File;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.ServiceLoader;
 
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
@@ -19,8 +21,10 @@ import org.testng.annotations.Test;
 import com.linkedin.coral.benchmark.catalog.InMemoryCatalog;
 import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
+import com.linkedin.coral.benchmark.plugin.PluginClassLoader;
 import com.linkedin.coral.benchmark.plugin.PluginRegistry;
 import com.linkedin.coral.benchmark.spi.Dialect;
+import com.linkedin.coral.benchmark.spi.DialectPluginProvider;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.benchmark.spi.VerificationLevel;
 import com.linkedin.coral.benchmark.suite.QueryTestResult;
@@ -112,44 +116,93 @@ public class TestCrossDialectSelectStar {
     RowSet users = RowSet.builder(usersSchema).addRow(1, "alice").addRow(2, "bob").build();
 
     PluginRegistry registry = new PluginRegistry(getClass().getClassLoader());
-
-    // 2) Drive the Trino engine end-to-end and print what comes back.
-    EnginePlugin trino = registry.loadEnginePlugin(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.engine"));
-    System.out.println("[skeptic] Trino engine plugin instance: " + trino);
-    trino.start();
     try {
-      // CoralCatalog-derived schema -> engine table.
-      trino.createTable("default", "users", retrieved);
-      trino.loadData("default", "users", users);
+      // Sanity check that ServiceLoader-via-PluginClassLoader actually finds the plugin's
+      // own provider, not a parent-classpath one. This is the regression guard for the
+      // child-first getResources override on PluginClassLoader.
+      assertSparkDialectProviderLoadsFromPluginClassLoader();
 
-      ResultSet rs = trino.execute("SELECT * FROM memory.default.users ORDER BY id");
-      printResultSet("Trino", rs);
-      Assert.assertEquals(rs.size(), 2, "Trino should return 2 rows");
-      Assert.assertEquals(rs.getRows().get(0)[0], 1, "Trino row 0 id");
-      Assert.assertEquals(rs.getRows().get(0)[1].toString(), "alice", "Trino row 0 name");
-      Assert.assertEquals(rs.getRows().get(1)[0], 2, "Trino row 1 id");
-      Assert.assertEquals(rs.getRows().get(1)[1].toString(), "bob", "Trino row 1 name");
+      // 2) Drive the Trino engine end-to-end and print what comes back.
+      EnginePlugin trino = registry.loadEnginePlugin(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.engine"));
+      System.out.println("[skeptic] Trino engine plugin instance: " + trino);
+      trino.start();
+      try {
+        // CoralCatalog-derived schema -> engine table.
+        trino.createTable("default", "users", retrieved);
+        trino.loadData("default", "users", users);
+
+        ResultSet rs = trino.execute("SELECT * FROM memory.default.users ORDER BY id");
+        printResultSet("Trino", rs);
+        Assert.assertEquals(rs.size(), 2, "Trino should return 2 rows");
+        Assert.assertEquals(rs.getRows().get(0)[0], 1, "Trino row 0 id");
+        Assert.assertEquals(rs.getRows().get(0)[1].toString(), "alice", "Trino row 0 name");
+        Assert.assertEquals(rs.getRows().get(1)[0], 2, "Trino row 1 id");
+        Assert.assertEquals(rs.getRows().get(1)[1].toString(), "bob", "Trino row 1 name");
+      } finally {
+        trino.stop();
+        closeQuietly(trino);
+      }
+
+      // 3) Same drill for Spark.
+      EnginePlugin spark =
+          registry.loadEnginePlugin(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.engine"));
+      System.out.println("[skeptic] Spark engine plugin instance: " + spark);
+      spark.start();
+      try {
+        spark.createTable("default", "users", retrieved);
+        spark.loadData("default", "users", users);
+
+        ResultSet rs = spark.execute("SELECT * FROM default.users ORDER BY id");
+        printResultSet("Spark", rs);
+        Assert.assertEquals(rs.size(), 2, "Spark should return 2 rows");
+        Assert.assertEquals(rs.getRows().get(0)[0], 1, "Spark row 0 id");
+        Assert.assertEquals(rs.getRows().get(0)[1].toString(), "alice", "Spark row 0 name");
+        Assert.assertEquals(rs.getRows().get(1)[0], 2, "Spark row 1 id");
+        Assert.assertEquals(rs.getRows().get(1)[1].toString(), "bob", "Spark row 1 name");
+      } finally {
+        spark.stop();
+        closeQuietly(spark);
+      }
     } finally {
-      trino.stop();
+      registry.close();
     }
+  }
 
-    // 3) Same drill for Spark.
-    EnginePlugin spark = registry.loadEnginePlugin(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.engine"));
-    System.out.println("[skeptic] Spark engine plugin instance: " + spark);
-    spark.start();
+  /**
+   * Loads the Spark dialect plugin's {@link DialectPluginProvider} through a real
+   * {@link PluginClassLoader} and asserts the provider class came from the plugin's own
+   * jars — i.e. its defining loader is a {@link PluginClassLoader}, not the parent. This
+   * guards against a regression where {@code PluginClassLoader.getResources} falls back
+   * to the default parent-first {@link java.net.URLClassLoader} behavior and silently
+   * resolves a competing service file from the parent classpath.
+   */
+  private void assertSparkDialectProviderLoadsFromPluginClassLoader() {
+    List<URL> jars = classpathOf("coral.benchmark.plugin.spark.dialect");
+    PluginClassLoader loader = new PluginClassLoader(jars.toArray(new URL[0]), getClass().getClassLoader());
     try {
-      spark.createTable("default", "users", retrieved);
-      spark.loadData("default", "users", users);
-
-      ResultSet rs = spark.execute("SELECT * FROM default.users ORDER BY id");
-      printResultSet("Spark", rs);
-      Assert.assertEquals(rs.size(), 2, "Spark should return 2 rows");
-      Assert.assertEquals(rs.getRows().get(0)[0], 1, "Spark row 0 id");
-      Assert.assertEquals(rs.getRows().get(0)[1].toString(), "alice", "Spark row 0 name");
-      Assert.assertEquals(rs.getRows().get(1)[0], 2, "Spark row 1 id");
-      Assert.assertEquals(rs.getRows().get(1)[1].toString(), "bob", "Spark row 1 name");
+      DialectPluginProvider sparkProvider = null;
+      for (DialectPluginProvider provider : ServiceLoader.load(DialectPluginProvider.class, loader)) {
+        if (provider.dialect() == Dialect.SPARK) {
+          sparkProvider = provider;
+          break;
+        }
+      }
+      Assert.assertNotNull(sparkProvider,
+          "ServiceLoader should discover the Spark dialect provider on a PluginClassLoader");
+      ClassLoader defining = sparkProvider.getClass().getClassLoader();
+      Assert.assertTrue(defining instanceof PluginClassLoader,
+          "Spark DialectPluginProvider must be loaded by a PluginClassLoader, was " + defining);
     } finally {
-      spark.stop();
+      closeQuietly(loader);
+    }
+  }
+
+  private static void closeQuietly(Object o) {
+    if (o instanceof Closeable) {
+      try {
+        ((Closeable) o).close();
+      } catch (Exception ignored) {
+      }
     }
   }
 

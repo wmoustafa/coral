@@ -5,6 +5,9 @@
  */
 package com.linkedin.coral.benchmark.plugin;
 
+import java.io.Closeable;
+import java.io.IOException;
+
 import com.linkedin.coral.benchmark.data.ExplainResult;
 import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
@@ -20,13 +23,19 @@ import com.linkedin.coral.common.types.CoralDataType;
  * lookups, Hadoop configuration discovery, and reflective class loading — without the
  * swap, those lookups would land in the parent loader (which only has the SPI) and fail
  * to find the engine's own bindings.
+ *
+ * <p>Implements {@link Closeable} so callers can release the underlying
+ * {@link PluginClassLoader} after the engine has been stopped. Spark and Trino install
+ * MBeans, Netty thread pools, Hadoop FileSystem cache entries, and shutdown hooks that
+ * keep the loader strongly reachable; closing the loader (after {@link #stop()})
+ * unblocks GC of the entire engine runtime.
  */
-final class ContextClassLoaderEnginePlugin implements EnginePlugin {
+final class ContextClassLoaderEnginePlugin implements EnginePlugin, Closeable {
 
   private final EnginePlugin delegate;
-  private final ClassLoader pluginLoader;
+  private final PluginClassLoader pluginLoader;
 
-  ContextClassLoaderEnginePlugin(EnginePlugin delegate, ClassLoader pluginLoader) {
+  ContextClassLoaderEnginePlugin(EnginePlugin delegate, PluginClassLoader pluginLoader) {
     this.delegate = delegate;
     this.pluginLoader = pluginLoader;
   }
@@ -86,5 +95,10 @@ final class ContextClassLoaderEnginePlugin implements EnginePlugin {
     } finally {
       Thread.currentThread().setContextClassLoader(previous);
     }
+  }
+
+  @Override
+  public void close() throws IOException {
+    pluginLoader.close();
   }
 }

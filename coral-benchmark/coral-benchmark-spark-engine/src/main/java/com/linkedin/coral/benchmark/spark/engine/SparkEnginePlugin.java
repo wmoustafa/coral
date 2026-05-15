@@ -10,9 +10,7 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Stream;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
@@ -33,8 +31,14 @@ import com.linkedin.coral.common.types.CoralDataType;
 /**
  * {@link EnginePlugin} that runs queries against an in-process Spark 3.5 session.
  * Uses Spark's default file-backed catalog (no Hive metastore required); tables are
- * materialized as Parquet under a temporary warehouse directory that is cleaned up
- * on {@link #stop()}.
+ * materialized as Parquet under a temporary warehouse directory.
+ *
+ * <p>We deliberately do not delete the warehouse directory on {@link #stop()}.
+ * {@code spark.stop()} returns before all of Spark's {@code ContextCleaner} and
+ * block-manager threads have flushed shuffle/spill files; an immediate recursive delete
+ * races with those threads (partial state, or hard failures on Windows). The directory
+ * is created under {@link Files#createTempDirectory(String, java.nio.file.attribute.FileAttribute...)}
+ * which puts it under the JVM temp dir, so the OS will reap it on its own schedule.
  */
 public final class SparkEnginePlugin implements EnginePlugin {
 
@@ -61,6 +65,10 @@ public final class SparkEnginePlugin implements EnginePlugin {
   @Override
   public void createTable(String namespace, String tableName, CoralDataType schema) {
     requireStarted();
+    if (!(schema instanceof com.linkedin.coral.common.types.StructType)) {
+      throw new IllegalArgumentException("createTable: schema for " + namespace + "." + tableName
+          + " must be a StructType, got: " + (schema == null ? "null" : schema.getClass().getName()));
+    }
     StructType sparkSchema =
         CoralTypeToSpark.toSparkSchema((com.linkedin.coral.common.types.StructType) schema);
     StringBuilder cols = new StringBuilder();
@@ -124,18 +132,11 @@ public final class SparkEnginePlugin implements EnginePlugin {
       }
       spark = null;
     }
-    if (warehouseDir != null) {
-      try (Stream<Path> walk = Files.walk(warehouseDir)) {
-        walk.sorted(Comparator.reverseOrder()).forEach(p -> {
-          try {
-            Files.deleteIfExists(p);
-          } catch (IOException ignored) {
-          }
-        });
-      } catch (IOException ignored) {
-      }
-      warehouseDir = null;
-    }
+    // Intentionally do NOT recursively delete warehouseDir here. spark.stop() returns
+    // before Spark's ContextCleaner / block-manager threads have flushed shuffle/spill
+    // files; deleting the directory now races with those threads. The directory lives
+    // under the JVM temp dir, so the OS will clean it up on its own schedule.
+    warehouseDir = null;
   }
 
   private void requireStarted() {

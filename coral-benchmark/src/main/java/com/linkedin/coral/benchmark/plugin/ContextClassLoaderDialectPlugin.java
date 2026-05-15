@@ -5,6 +5,9 @@
  */
 package com.linkedin.coral.benchmark.plugin;
 
+import java.io.Closeable;
+import java.io.IOException;
+
 import org.apache.calcite.rel.RelNode;
 
 import com.linkedin.coral.benchmark.spi.Dialect;
@@ -16,13 +19,17 @@ import com.linkedin.coral.benchmark.spi.DialectPlugin;
  * {@link PluginClassLoader} as the thread context classloader. Calcite, ANTLR, and the
  * Coral converter pipeline all use {@link java.util.ServiceLoader} indirectly; the
  * context-loader swap keeps those lookups landing inside the plugin's isolated jars.
+ *
+ * <p>Implements {@link Closeable} so callers can release the underlying
+ * {@link PluginClassLoader} once they are done with the plugin — important because
+ * the loader transitively holds onto every class the plugin's runtime instantiated.
  */
-final class ContextClassLoaderDialectPlugin implements DialectPlugin {
+final class ContextClassLoaderDialectPlugin implements DialectPlugin, Closeable {
 
   private final DialectPlugin delegate;
-  private final ClassLoader pluginLoader;
+  private final PluginClassLoader pluginLoader;
 
-  ContextClassLoaderDialectPlugin(DialectPlugin delegate, ClassLoader pluginLoader) {
+  ContextClassLoaderDialectPlugin(DialectPlugin delegate, PluginClassLoader pluginLoader) {
     this.delegate = delegate;
     this.pluginLoader = pluginLoader;
   }
@@ -50,5 +57,10 @@ final class ContextClassLoaderDialectPlugin implements DialectPlugin {
     } finally {
       Thread.currentThread().setContextClassLoader(previous);
     }
+  }
+
+  @Override
+  public void close() throws IOException {
+    pluginLoader.close();
   }
 }

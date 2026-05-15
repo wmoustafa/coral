@@ -6,6 +6,7 @@
 package com.linkedin.coral.benchmark.comparison;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -78,7 +79,11 @@ public final class ResultSetComparator {
     List<Object[]> targetRows = new ArrayList<>(target.getRows());
 
     if (!config.isOrderedComparison()) {
-      Comparator<Object[]> rowComparator = (a, b) -> Arrays.deepToString(a).compareTo(Arrays.deepToString(b));
+      // The sort key must collapse types that cellsEqual considers identical, otherwise
+      // two rows the comparator regards as equal can sort to different positions and emit
+      // a spurious mismatch (Integer(1) vs Long(1), BigDecimal("1.0") vs BigDecimal("1.00")
+      // are the classic offenders).
+      Comparator<Object[]> rowComparator = (a, b) -> canonicalRowKey(a).compareTo(canonicalRowKey(b));
       sourceRows.sort(rowComparator);
       targetRows.sort(rowComparator);
     }
@@ -105,22 +110,93 @@ public final class ResultSetComparator {
       return a == null && b == null;
     }
     if (a instanceof Number && b instanceof Number) {
-      double da = ((Number) a).doubleValue();
-      double db = ((Number) b).doubleValue();
-      if (a instanceof BigDecimal && b instanceof BigDecimal) {
-        return ((BigDecimal) a).compareTo((BigDecimal) b) == 0;
+      boolean aFloat = isFloatLike(a);
+      boolean bFloat = isFloatLike(b);
+      // Float-vs-float: epsilon comparison.
+      if (aFloat && bFloat) {
+        return Math.abs(((Number) a).doubleValue() - ((Number) b).doubleValue()) <= config.getFloatingPointEpsilon();
       }
-      if (a instanceof Float || a instanceof Double || b instanceof Float || b instanceof Double) {
-        return Math.abs(da - db) <= config.getFloatingPointEpsilon();
+      // Integral-vs-integral: exact, optionally with widening.
+      if (!aFloat && !bFloat) {
+        if (a instanceof BigDecimal && b instanceof BigDecimal) {
+          return ((BigDecimal) a).compareTo((BigDecimal) b) == 0;
+        }
+        if (config.isAllowTypeWidening() || a.getClass() == b.getClass()) {
+          return toExactBigDecimal((Number) a).compareTo(toExactBigDecimal((Number) b)) == 0;
+        }
+        return false;
       }
-      if (config.isAllowTypeWidening()) {
-        return ((Number) a).longValue() == ((Number) b).longValue();
-      }
+      // Mixed integral / float: compare via BigDecimal so we reject silent precision loss
+      // (e.g., Long(Long.MAX_VALUE) vs Float that rounded to a different integer).
+      return toExactBigDecimal((Number) a).compareTo(toExactBigDecimal((Number) b)) == 0;
     }
     if (a.getClass().isArray() && b.getClass().isArray()) {
       return Arrays.deepEquals((Object[]) a, (Object[]) b);
     }
     return Objects.equals(a, b);
+  }
+
+  private static boolean isFloatLike(Object o) {
+    return o instanceof Float || o instanceof Double;
+  }
+
+  /**
+   * Lossless conversion of a {@link Number} to {@link BigDecimal}. Critically, integral
+   * subtypes go through their {@code long}/{@link BigInteger} form so we don't round-trip
+   * through {@code double} and lose precision; floating subtypes go through
+   * {@link BigDecimal#valueOf(double)} which preserves the IEEE value's exact rational
+   * representation as decimal. That's what makes {@code Long.MAX_VALUE} vs its rounded
+   * float counterpart compare unequal here.
+   */
+  private static BigDecimal toExactBigDecimal(Number n) {
+    if (n instanceof BigDecimal) {
+      return (BigDecimal) n;
+    }
+    if (n instanceof BigInteger) {
+      return new BigDecimal((BigInteger) n);
+    }
+    if (n instanceof Float || n instanceof Double) {
+      return BigDecimal.valueOf(n.doubleValue());
+    }
+    // Byte, Short, Integer, Long, AtomicInteger, AtomicLong, etc.
+    return BigDecimal.valueOf(n.longValue());
+  }
+
+  private String canonicalRowKey(Object[] row) {
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < row.length; i++) {
+      if (i > 0) {
+        sb.append('|');
+      }
+      sb.append(canonicalCellKey(row[i]));
+    }
+    return sb.toString();
+  }
+
+  private String canonicalCellKey(Object v) {
+    if (v == null) {
+      return "\0";
+    }
+    if (v instanceof Number) {
+      Number n = (Number) v;
+      if (isFloatLike(n)) {
+        // Bucket float values into eps-wide bands so two floats the comparator considers
+        // equal land in the same band. Bucket index = round((value - bandStart) / eps);
+        // with eps == 0 fall back to the exact stripped form.
+        double eps = config.getFloatingPointEpsilon();
+        if (eps > 0.0) {
+          long bucket = Math.round(n.doubleValue() / eps);
+          return "F:" + bucket;
+        }
+        return "F:" + BigDecimal.valueOf(n.doubleValue()).stripTrailingZeros().toPlainString();
+      }
+      // Integral and mixed compare via the same canonical BigDecimal that cellsEqual uses.
+      return "N:" + toExactBigDecimal(n).stripTrailingZeros().toPlainString();
+    }
+    if (v.getClass().isArray()) {
+      return "A:" + Arrays.deepToString((Object[]) v);
+    }
+    return "S:" + v;
   }
 
   private static String repr(Object v) {

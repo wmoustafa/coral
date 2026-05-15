@@ -5,6 +5,7 @@
  */
 package com.linkedin.coral.benchmark.suite;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
@@ -114,7 +115,8 @@ public final class TranslationTestSuite {
   private final Map<String, RowSet> testData;
   private final ComparisonConfig comparisonConfig;
 
-  private TranslationTestSuite(Builder builder, DialectPlugin sourcePlugin, DialectPlugin targetPlugin) {
+  private TranslationTestSuite(Builder builder, DialectPlugin sourcePlugin, DialectPlugin targetPlugin,
+      EnginePlugin sourceEngine, EnginePlugin targetEngine) {
     this.source = builder.source;
     this.target = builder.target;
     this.catalog = builder.catalog;
@@ -122,8 +124,8 @@ public final class TranslationTestSuite {
     this.verificationLevel = builder.verificationLevel;
     this.sourcePlugin = sourcePlugin;
     this.targetPlugin = targetPlugin;
-    this.sourceEngine = builder.sourceEngine;
-    this.targetEngine = builder.targetEngine;
+    this.sourceEngine = sourceEngine;
+    this.targetEngine = targetEngine;
     this.testData = Collections.unmodifiableMap(new HashMap<>(builder.testData));
     this.comparisonConfig = builder.comparisonConfig;
   }
@@ -171,21 +173,39 @@ public final class TranslationTestSuite {
         results.add(runOne(q, comparator));
       }
     } finally {
+      // Use Throwable, not RuntimeException, so a JVM-level Error thrown from one
+      // engine's teardown doesn't prevent the other engine from getting its stop().
       if (needSourceEngine && sourceEngine != null) {
         try {
           sourceEngine.stop();
-        } catch (RuntimeException ignored) {
+        } catch (Throwable ignored) {
         }
+        closeQuietly(sourceEngine);
       }
       if (needTargetEngine && targetEngine != null) {
         try {
           targetEngine.stop();
-        } catch (RuntimeException ignored) {
+        } catch (Throwable ignored) {
         }
+        closeQuietly(targetEngine);
       }
+      // Dialect plugins don't have a stop() method but they DO hold a PluginClassLoader
+      // when loaded via PluginRegistry; closing releases the loader and unblocks GC of
+      // any cached converter state.
+      closeQuietly(sourcePlugin);
+      closeQuietly(targetPlugin);
     }
 
     return new TestReport(source, target, verificationLevel, results);
+  }
+
+  private static void closeQuietly(Object o) {
+    if (o instanceof Closeable) {
+      try {
+        ((Closeable) o).close();
+      } catch (Throwable ignored) {
+      }
+    }
   }
 
   private QueryTestResult runOne(QueryFile q, ResultSetComparator comparator) {
@@ -597,10 +617,12 @@ public final class TranslationTestSuite {
       if (needTargetEngine && resolvedTargetEngine == null) {
         resolvedTargetEngine = registry.loadEnginePlugin(target, engineJars.get(target));
       }
-      this.sourceEngine = resolvedSourceEngine;
-      this.targetEngine = resolvedTargetEngine;
 
-      return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin);
+      // Pass resolved plugins/engines through the constructor rather than mutating the
+      // builder. A repeated build() call must produce a fresh suite with fresh plugins,
+      // not silently inherit (potentially already-stopped) instances from the first build.
+      return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin, resolvedSourceEngine,
+          resolvedTargetEngine);
     }
 
     private DialectPlugin resolveDialectPlugin(Dialect dialect, PluginRegistry registry,

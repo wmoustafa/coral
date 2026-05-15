@@ -5,11 +5,17 @@
  */
 package com.linkedin.coral.benchmark.plugin;
 
+import java.io.IOException;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 
 /**
@@ -149,6 +155,29 @@ public final class PluginClassLoader extends URLClassLoader {
       return own;
     }
     return sharedParent.getResource(name);
+  }
+
+  @Override
+  public Enumeration<URL> getResources(String name) throws IOException {
+    // ServiceLoader.load(spi, loader) calls loader.getResources("META-INF/services/<spi>").
+    // The default URLClassLoader implementation walks the parent first, so a competing
+    // provider service file on the parent classpath would shadow the plugin's own. Mirror
+    // the child-first rule from loadClass/getResource here: force-parent resources still
+    // come from the parent, but everything else lists plugin entries first, with parent
+    // entries appended for completeness (de-duplicated).
+    if (isParentExposedResource(name)) {
+      return sharedParent.getResources(name);
+    }
+    Set<URL> seen = new LinkedHashSet<>();
+    Enumeration<URL> own = findResources(name);
+    while (own.hasMoreElements()) {
+      seen.add(own.nextElement());
+    }
+    Enumeration<URL> fromParent = sharedParent.getResources(name);
+    while (fromParent.hasMoreElements()) {
+      seen.add(fromParent.nextElement());
+    }
+    return Collections.enumeration(new ArrayList<>(seen));
   }
 
   private boolean isForceParent(String className) {

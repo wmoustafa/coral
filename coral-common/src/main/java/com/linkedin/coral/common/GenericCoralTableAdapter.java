@@ -66,8 +66,17 @@ public class GenericCoralTableAdapter implements ScannableTable {
     return true;
   }
 
+  /**
+   * Coral uses this adapter only for catalog/type resolution during SQL -&gt; IR conversion;
+   * the resulting {@code RelNode} is handed off to engines that ignore Calcite's enumerable
+   * execution path entirely. Implementing {@link ScannableTable} is required because
+   * Calcite's {@code EnumerableTableScan} constructor asserts the table advertises a
+   * scannable capability, even when scan is never invoked. {@code scan} therefore throws;
+   * any caller that actually drives it is misusing this adapter.
+   */
   @Override
   public Enumerable<Object[]> scan(DataContext root) {
-    throw new UnsupportedOperationException("GenericCoralTableAdapter does not support Calcite-side execution");
+    throw new UnsupportedOperationException("GenericCoralTableAdapter is metadata-only; "
+        + "use the dialect plugin's engine to materialize rows. Calcite-side scan is unsupported.");
   }
 }
