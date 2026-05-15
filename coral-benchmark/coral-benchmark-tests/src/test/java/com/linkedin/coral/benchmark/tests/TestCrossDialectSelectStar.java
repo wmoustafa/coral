@@ -105,8 +105,8 @@ public class TestCrossDialectSelectStar {
       RowSet users) {
     return TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
         .verificationLevel(VerificationLevel.RESULT_SET)
-        .dialectPluginJars(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.dialect"))
-        .dialectPluginJars(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.dialect"))
+        .dialectPluginJars(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.sql.dialect"))
+        .dialectPluginJars(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.sql.dialect"))
         .enginePluginJars(Dialect.SPARK, classpathOf("coral.benchmark.plugin.spark.engine"))
         .enginePluginJars(Dialect.TRINO, classpathOf("coral.benchmark.plugin.trino.engine"))
         .testData("default.users", users);

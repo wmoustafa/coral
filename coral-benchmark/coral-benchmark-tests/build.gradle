@@ -7,9 +7,9 @@ apply plugin: 'java-library'
 // only meet inside the runtime PluginClassLoader, where each plugin sees only its own
 // jars.
 configurations {
-  sparkDialectPlugin
+  sparkSqlDialectPlugin
   sparkEnginePlugin
-  trinoDialectPlugin
+  trinoSqlDialectPlugin
   trinoEnginePlugin
 }
 
@@ -18,8 +18,8 @@ configurations {
 // info) and they're already in the parent loader anyway — strip them from every plugin
 // classpath. Same goes for everything else that's part of the shared SPI / parent loader
 // surface: coral-common's transitive Hive metastore tree, Iceberg, etc.
-[configurations.sparkDialectPlugin, configurations.sparkEnginePlugin,
-    configurations.trinoDialectPlugin, configurations.trinoEnginePlugin].each {
+[configurations.sparkSqlDialectPlugin, configurations.sparkEnginePlugin,
+    configurations.trinoSqlDialectPlugin, configurations.trinoEnginePlugin].each {
   it.exclude group: 'com.linkedin.calcite'
   it.exclude group: 'com.linkedin.coral', module: 'coral-common'
   it.exclude group: 'com.linkedin.coral', module: 'coral-benchmark'
@@ -30,18 +30,18 @@ dependencies {
   // runtimes never appear on the test compile/runtime classpath.
   testImplementation project(path: ':coral-benchmark')
 
-  sparkDialectPlugin project(path: ':coral-benchmark:coral-benchmark-spark-dialect')
+  sparkSqlDialectPlugin project(path: ':coral-benchmark:coral-benchmark-spark-sql-dialect')
   sparkEnginePlugin project(path: ':coral-benchmark:coral-benchmark-spark-engine')
-  trinoDialectPlugin project(path: ':coral-benchmark:coral-benchmark-trino-dialect')
+  trinoSqlDialectPlugin project(path: ':coral-benchmark:coral-benchmark-trino-sql-dialect')
   trinoEnginePlugin project(path: ':coral-benchmark:coral-benchmark-trino-engine')
 }
 
 test {
   // Hand each plugin's resolved classpath to the test JVM via a system property; the
   // test code parses these into URL lists and feeds them to TranslationTestSuite.
-  systemProperty 'coral.benchmark.plugin.spark.dialect', configurations.sparkDialectPlugin.asPath
+  systemProperty 'coral.benchmark.plugin.spark.sql.dialect', configurations.sparkSqlDialectPlugin.asPath
   systemProperty 'coral.benchmark.plugin.spark.engine', configurations.sparkEnginePlugin.asPath
-  systemProperty 'coral.benchmark.plugin.trino.dialect', configurations.trinoDialectPlugin.asPath
+  systemProperty 'coral.benchmark.plugin.trino.sql.dialect', configurations.trinoSqlDialectPlugin.asPath
   systemProperty 'coral.benchmark.plugin.trino.engine', configurations.trinoEnginePlugin.asPath
 
   if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_17)) {
