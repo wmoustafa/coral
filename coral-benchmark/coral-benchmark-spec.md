@@ -353,7 +353,7 @@ coral-benchmark/                              (SPI + orchestrator)
   coral-benchmark-tests/                      integration tests
     build.gradle                              per-plugin Gradle Configurations
     src/test/java/.../tests/
-      TestCrossDialectSelectStar.java         cross-dialect SELECT * + filtered + negative
+      TestCrossDialectTranslation.java        cross-dialect happy-path + negative tests
     src/test/resources/queries/
       spark_sql/      *.sql happy-path corpus
       trino_sql/      *.sql happy-path corpus

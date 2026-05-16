@@ -12,8 +12,8 @@ import com.linkedin.coral.common.types.StructType;
 
 
 /**
- * Maps Coral types to Trino SQL type names for DDL generation.
- * Scope is the primitive set needed by the SELECT * smoke tests.
+ * Maps Coral primitive types to Trino SQL type names for DDL generation. Complex types
+ * (ARRAY, MAP, ROW) can be added as the benchmark corpus grows.
  */
 final class CoralTypeToTrino {
 

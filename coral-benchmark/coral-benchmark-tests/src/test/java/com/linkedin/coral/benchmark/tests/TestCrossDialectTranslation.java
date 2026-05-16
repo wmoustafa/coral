@@ -35,7 +35,7 @@ import com.linkedin.coral.common.types.StructType;
  * each plugin's classpath is handed in via system properties (populated by Gradle's
  * per-plugin configurations) and loaded inside an isolated {@code PluginClassLoader}.
  */
-public class TestCrossDialectSelectStar {
+public class TestCrossDialectTranslation {
 
   @DataProvider(name = "directions")
   public Object[][] directions() {

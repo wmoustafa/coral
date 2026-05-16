@@ -20,9 +20,9 @@ import com.linkedin.coral.common.types.PrimitiveType;
 
 
 /**
- * Maps Coral types to Spark SQL types for the SELECT * smoke-test scope.
- * Complex types (ARRAY, MAP, STRUCT) and exotic primitives (DECIMAL, CHAR, VARCHAR with
- * explicit length) can be added as the benchmark corpus grows.
+ * Maps Coral primitive types to Spark SQL types. Complex types (ARRAY, MAP, STRUCT) and
+ * variable-length primitives (DECIMAL, CHAR(n), VARCHAR(n)) can be added as the benchmark
+ * corpus grows.
  */
 final class CoralTypeToSpark {
 
