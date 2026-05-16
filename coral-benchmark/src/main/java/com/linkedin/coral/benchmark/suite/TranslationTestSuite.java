@@ -23,7 +23,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.ServiceLoader;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -38,7 +37,6 @@ import com.linkedin.coral.benchmark.data.RowSet;
 import com.linkedin.coral.benchmark.plugin.PluginRegistry;
 import com.linkedin.coral.benchmark.spi.Dialect;
 import com.linkedin.coral.benchmark.spi.DialectPlugin;
-import com.linkedin.coral.benchmark.spi.DialectPluginProvider;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.benchmark.spi.VerificationLevel;
 import com.linkedin.coral.common.catalog.CoralCatalog;
@@ -50,52 +48,28 @@ import com.linkedin.coral.common.types.StructType;
  * Main orchestrator for cross-dialect translation benchmark tests.
  *
  * <p>A test suite is parameterized by source dialect, target dialect, verification level,
- * and the catalog/data/engines needed for that level. It reads all {@code .sql} files from
- * a query directory, translates each through the Coral IR pipeline, and verifies the result
- * at the configured level.
+ * the catalog, and the runtime classpath URLs of the dialect / engine plugins it needs. It
+ * reads all {@code .sql} files from the configured query directory, translates each
+ * through the Coral IR pipeline, and verifies the result at the configured level.
  *
- * <p>Usage (Level 1 - translation only):
+ * <p>Every plugin is materialized inside its own {@link PluginRegistry}-managed
+ * classloader — there is intentionally no path that lets a caller hand in a pre-built
+ * {@link DialectPlugin} or {@link EnginePlugin} instance, because that would bypass the
+ * classpath isolation the harness exists to provide.
+ *
+ * <p>Usage:
  * <pre>{@code
  * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.HIVE_SQL)
+ *     .source(Dialect.SPARK_SQL)
  *     .target(Dialect.TRINO_SQL)
  *     .catalog(catalog)
- *     .queryDir("queries/hive")
- *     .verificationLevel(VerificationLevel.TRANSLATION)
- *     .build();
- *
- * TestReport report = suite.run();
- * }</pre>
- *
- * <p>Usage (Level 2 - EXPLAIN):
- * <pre>{@code
- * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.HIVE_SQL)
- *     .target(Dialect.TRINO_SQL)
- *     .catalog(catalog)
- *     .queryDir("queries/hive")
- *     .verificationLevel(VerificationLevel.EXPLAIN)
- *     .targetEngine(new TrinoEnginePlugin())
- *     .build();
- *
- * TestReport report = suite.run();
- * }</pre>
- *
- * <p>Usage (Level 3 - result set comparison):
- * <pre>{@code
- * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.HIVE_SQL)
- *     .target(Dialect.TRINO_SQL)
- *     .catalog(catalog)
- *     .queryDir("queries/hive")
+ *     .queryDir("queries/spark_sql")
  *     .verificationLevel(VerificationLevel.RESULT_SET)
- *     .testData("db.users", userData)
- *     .testData("db.events", eventData)
- *     .sourceEngine(new SparkEnginePlugin())
- *     .targetEngine(new TrinoEnginePlugin())
- *     .comparisonConfig(ComparisonConfig.builder()
- *         .floatingPointEpsilon(1e-6)
- *         .build())
+ *     .dialectPluginJars(Dialect.SPARK_SQL, sparkDialectJars)
+ *     .dialectPluginJars(Dialect.TRINO_SQL, trinoDialectJars)
+ *     .enginePluginJars(Dialect.SPARK_SQL, sparkEngineJars)
+ *     .enginePluginJars(Dialect.TRINO_SQL, trinoEngineJars)
+ *     .testData("default.users", userData)
  *     .build();
  *
  * TestReport report = suite.run();
@@ -175,14 +149,16 @@ public final class TranslationTestSuite {
     } finally {
       // Use Throwable, not RuntimeException, so a JVM-level Error thrown from one
       // engine's teardown doesn't prevent the other engine from getting its stop().
-      if (needSourceEngine && sourceEngine != null) {
+      // build() has already validated that engines are non-null whenever their need-flag
+      // is set, so no null checks needed here.
+      if (needSourceEngine) {
         try {
           sourceEngine.stop();
         } catch (Throwable ignored) {
         }
         closeQuietly(sourceEngine);
       }
-      if (needTargetEngine && targetEngine != null) {
+      if (needTargetEngine) {
         try {
           targetEngine.stop();
         } catch (Throwable ignored) {
@@ -347,16 +323,15 @@ public final class TranslationTestSuite {
   /**
    * Builder for {@link TranslationTestSuite}.
    *
-   * <p>Required for all levels: source, target, catalog, queryDir, verificationLevel.
-   * <p>Required for EXPLAIN: targetEngine.
-   * <p>Required for RESULT_SET: sourceEngine, targetEngine, testData.
+   * <p>Required for all levels: source, target, catalog, queryDir, verificationLevel,
+   * and {@link #dialectPluginJars} for both the source and target dialects.
+   * <p>Required for EXPLAIN: {@link #enginePluginJars} for the target dialect.
+   * <p>Required for RESULT_SET: {@link #enginePluginJars} for both source and target
+   * dialects, plus {@link #testData}.
    *
-   * <p>Dialect plugins are resolved by matching {@link DialectPluginProvider#dialect()}
-   * against the configured source and target dialects, using
-   * {@link java.util.ServiceLoader} discovery by default. Callers may override either
-   * provider explicitly via {@link #sourcePluginProvider} or {@link #targetPluginProvider}
-   * (e.g. for tests, or to inject a non-discovered implementation). The framework calls
-   * {@code provider.create(catalog)} during {@link #build()} to materialize the plugin.
+   * <p>Plugins are always materialized inside a {@link PluginRegistry}-managed
+   * classloader, rooted at the supplied jar URLs, so the harness's classpath-isolation
+   * guarantees hold for every code path.
    */
   public static final class Builder {
     private Dialect source;
@@ -364,10 +339,6 @@ public final class TranslationTestSuite {
     private CoralCatalog catalog;
     private String queryDir;
     private VerificationLevel verificationLevel;
-    private DialectPluginProvider sourcePluginProvider;
-    private DialectPluginProvider targetPluginProvider;
-    private EnginePlugin sourceEngine;
-    private EnginePlugin targetEngine;
     private final Map<Dialect, List<java.net.URL>> dialectJars = new HashMap<>();
     private final Map<Dialect, List<java.net.URL>> engineJars = new HashMap<>();
     private PluginRegistry pluginRegistry;
@@ -434,61 +405,9 @@ public final class TranslationTestSuite {
     }
 
     /**
-     * Explicitly sets the provider used to construct the source dialect plugin. If not
-     * set, the provider is resolved via {@link java.util.ServiceLoader} based on the
-     * source dialect.
-     *
-     * @param provider the source dialect plugin provider
-     * @return this builder
-     */
-    public Builder sourcePluginProvider(DialectPluginProvider provider) {
-      this.sourcePluginProvider = Objects.requireNonNull(provider);
-      return this;
-    }
-
-    /**
-     * Explicitly sets the provider used to construct the target dialect plugin. If not
-     * set, the provider is resolved via {@link java.util.ServiceLoader} based on the
-     * target dialect.
-     *
-     * @param provider the target dialect plugin provider
-     * @return this builder
-     */
-    public Builder targetPluginProvider(DialectPluginProvider provider) {
-      this.targetPluginProvider = Objects.requireNonNull(provider);
-      return this;
-    }
-
-    /**
-     * Sets the engine for executing queries in the source dialect.
-     * Required for {@link VerificationLevel#RESULT_SET}.
-     *
-     * @param engine the source engine
-     * @return this builder
-     */
-    public Builder sourceEngine(EnginePlugin engine) {
-      this.sourceEngine = Objects.requireNonNull(engine);
-      return this;
-    }
-
-    /**
-     * Sets the engine for executing queries in the target dialect.
-     * Required for {@link VerificationLevel#EXPLAIN} and {@link VerificationLevel#RESULT_SET}.
-     *
-     * @param engine the target engine
-     * @return this builder
-     */
-    public Builder targetEngine(EnginePlugin engine) {
-      this.targetEngine = Objects.requireNonNull(engine);
-      return this;
-    }
-
-    /**
-     * Registers the runtime classpath for a dialect plugin. When set, the framework
-     * materializes that dialect's plugin inside an isolated {@link PluginRegistry}
-     * classloader instead of using a directly-injected provider. This is what lets
-     * Spark and Trino plugins coexist without their conflicting transitive deps
-     * (Jackson, Avatica, SLF4J, runtime jars) colliding on a single classpath.
+     * Registers the runtime classpath for a dialect plugin. The plugin is materialized
+     * inside an isolated {@link PluginRegistry} classloader. Required for both the
+     * source and target dialects at every verification level.
      *
      * @param dialect the dialect the jars provide
      * @param jars    the plugin module's full runtime classpath (jar URLs)
@@ -587,67 +506,35 @@ public final class TranslationTestSuite {
       boolean needTargetEngine = verificationLevel.ordinal() >= VerificationLevel.EXPLAIN.ordinal();
       boolean needSourceEngine = verificationLevel == VerificationLevel.RESULT_SET;
 
-      if (needTargetEngine && targetEngine == null && !engineJars.containsKey(target)) {
-        throw new IllegalStateException(
-            "Target engine is required for verification level " + verificationLevel + " — supply one via "
-                + "targetEngine(EnginePlugin) or enginePluginJars(target, jars).");
+      requireJars(dialectJars, source, "dialectPluginJars(source, ...)");
+      requireJars(dialectJars, target, "dialectPluginJars(target, ...)");
+      if (needTargetEngine) {
+        requireJars(engineJars, target, "enginePluginJars(target, ...) (required for " + verificationLevel + ")");
       }
-      if (needSourceEngine && sourceEngine == null && !engineJars.containsKey(source)) {
-        throw new IllegalStateException(
-            "Source engine is required for RESULT_SET verification — supply one via "
-                + "sourceEngine(EnginePlugin) or enginePluginJars(source, jars).");
+      if (needSourceEngine) {
+        requireJars(engineJars, source, "enginePluginJars(source, ...) (required for RESULT_SET)");
       }
       if (verificationLevel == VerificationLevel.RESULT_SET && testData.isEmpty()) {
         throw new IllegalStateException("Test data is required for RESULT_SET verification");
       }
 
-      PluginRegistry registry = pluginRegistry;
-      if (registry == null && (!dialectJars.isEmpty() || !engineJars.isEmpty())) {
-        registry = new PluginRegistry(TranslationTestSuite.class.getClassLoader());
-      }
+      PluginRegistry registry =
+          pluginRegistry != null ? pluginRegistry : new PluginRegistry(TranslationTestSuite.class.getClassLoader());
 
-      DialectPlugin resolvedSourcePlugin = resolveDialectPlugin(source, registry, sourcePluginProvider);
-      DialectPlugin resolvedTargetPlugin = resolveDialectPlugin(target, registry, targetPluginProvider);
+      DialectPlugin resolvedSourcePlugin = registry.loadDialectPlugin(source, dialectJars.get(source), catalog);
+      DialectPlugin resolvedTargetPlugin = registry.loadDialectPlugin(target, dialectJars.get(target), catalog);
+      EnginePlugin resolvedSourceEngine = needSourceEngine ? registry.loadEnginePlugin(source, engineJars.get(source)) : null;
+      EnginePlugin resolvedTargetEngine = needTargetEngine ? registry.loadEnginePlugin(target, engineJars.get(target)) : null;
 
-      EnginePlugin resolvedSourceEngine = sourceEngine;
-      if (needSourceEngine && resolvedSourceEngine == null) {
-        resolvedSourceEngine = registry.loadEnginePlugin(source, engineJars.get(source));
-      }
-      EnginePlugin resolvedTargetEngine = targetEngine;
-      if (needTargetEngine && resolvedTargetEngine == null) {
-        resolvedTargetEngine = registry.loadEnginePlugin(target, engineJars.get(target));
-      }
-
-      // Pass resolved plugins/engines through the constructor rather than mutating the
-      // builder. A repeated build() call must produce a fresh suite with fresh plugins,
-      // not silently inherit (potentially already-stopped) instances from the first build.
       return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin, resolvedSourceEngine,
           resolvedTargetEngine);
     }
 
-    private DialectPlugin resolveDialectPlugin(Dialect dialect, PluginRegistry registry,
-        DialectPluginProvider explicitProvider) {
-      if (explicitProvider != null) {
-        return explicitProvider.create(catalog);
+    private static void requireJars(Map<Dialect, List<java.net.URL>> jars, Dialect dialect, String setterDescription) {
+      if (!jars.containsKey(dialect)) {
+        throw new IllegalStateException(
+            "Plugin classpath for " + dialect + " is required — call " + setterDescription + " on the builder.");
       }
-      if (dialectJars.containsKey(dialect)) {
-        if (registry == null) {
-          registry = new PluginRegistry(TranslationTestSuite.class.getClassLoader());
-        }
-        return registry.loadDialectPlugin(dialect, dialectJars.get(dialect), catalog);
-      }
-      return resolveProvider(dialect).create(catalog);
-    }
-
-    private static DialectPluginProvider resolveProvider(Dialect dialect) {
-      for (DialectPluginProvider provider : ServiceLoader.load(DialectPluginProvider.class)) {
-        if (provider.dialect() == dialect) {
-          return provider;
-        }
-      }
-      throw new IllegalStateException("No DialectPluginProvider registered for dialect " + dialect
-          + ". Set one explicitly via sourcePluginProvider/targetPluginProvider, register the plugin's classpath via "
-          + "dialectPluginJars(...), or add a META-INF/services/" + DialectPluginProvider.class.getName() + " entry.");
     }
   }
 }
