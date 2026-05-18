@@ -108,14 +108,9 @@ public class TestCrossDialectTranslation {
 
   private static TranslationTestSuite.Builder baseBuilder(Dialect source, Dialect target, InMemoryCatalog catalog,
       RowSet users) {
-    TranslationTestSuite.Builder b = TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
-        .verificationLevel(VerificationLevel.RESULT_SET).testData("default.users", users);
-    for (Dialect d : WIRED_DIALECTS) {
-      for (PluginKind k : PluginKind.values()) {
-        b.pluginJars(d, k, classpathOf(d, k));
-      }
-    }
-    return b;
+    return TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
+        .verificationLevel(VerificationLevel.RESULT_SET).testData("default.users", users)
+        .pluginJars(WIRED_DIALECTS, TestCrossDialectTranslation::classpathOf);
   }
 
   private static String describeFailures(TestReport report) {
