@@ -21,10 +21,8 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Collection;
 import java.util.Map;
 import java.util.Objects;
-import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -432,39 +430,6 @@ public final class TranslationTestSuite {
       Objects.requireNonNull(kind);
       Objects.requireNonNull(jars);
       this.pluginJars.get(kind).put(dialect, jars);
-      return this;
-    }
-
-    /**
-     * Bulk-registers plugin classpaths for the Cartesian product of {@code dialects} and
-     * every {@link PluginKind}, looking up each entry's classpath via {@code resolver}.
-     * The caller's loop body collapses from
-     * <pre>{@code
-     * for (Dialect d : dialects) {
-     *   for (PluginKind k : PluginKind.values()) {
-     *     b.pluginJars(d, k, classpathOf(d, k));
-     *   }
-     * }
-     * }</pre>
-     * to
-     * <pre>{@code
-     * b.pluginJars(dialects, this::classpathOf);
-     * }</pre>
-     * — the {@code (dialect, kind)} tuple is named exactly once, by the resolver.
-     *
-     * @param dialects the dialects to register plugins for
-     * @param resolver maps {@code (dialect, kind)} to the classpath for that plugin
-     * @return this builder
-     */
-    public Builder pluginJars(Collection<Dialect> dialects,
-        BiFunction<Dialect, PluginKind, List<java.net.URL>> resolver) {
-      Objects.requireNonNull(dialects);
-      Objects.requireNonNull(resolver);
-      for (Dialect d : dialects) {
-        for (PluginKind k : PluginKind.values()) {
-          pluginJars(d, k, resolver.apply(d, k));
-        }
-      }
       return this;
     }
 
