@@ -19,6 +19,7 @@ import org.testng.annotations.Test;
 import com.linkedin.coral.benchmark.catalog.InMemoryCatalog;
 import com.linkedin.coral.benchmark.data.RowSet;
 import com.linkedin.coral.benchmark.spi.Dialect;
+import com.linkedin.coral.benchmark.spi.PluginKind;
 import com.linkedin.coral.benchmark.spi.VerificationLevel;
 import com.linkedin.coral.benchmark.suite.QueryTestResult;
 import com.linkedin.coral.benchmark.suite.TestReport;
@@ -105,16 +106,14 @@ public class TestCrossDialectTranslation {
    *  the test doesn't try to load a HIVE_SQL plugin that doesn't ship yet. */
   private static final List<Dialect> WIRED_DIALECTS = Arrays.asList(Dialect.SPARK_SQL, Dialect.TRINO_SQL);
 
-  private static final String KIND_DIALECT = "dialect";
-  private static final String KIND_ENGINE = "engine";
-
   private static TranslationTestSuite.Builder baseBuilder(Dialect source, Dialect target, InMemoryCatalog catalog,
       RowSet users) {
     TranslationTestSuite.Builder b = TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
         .verificationLevel(VerificationLevel.RESULT_SET).testData("default.users", users);
     for (Dialect d : WIRED_DIALECTS) {
-      b.dialectPluginJars(d, classpathOf(d, KIND_DIALECT));
-      b.enginePluginJars(d, classpathOf(d, KIND_ENGINE));
+      for (PluginKind k : PluginKind.values()) {
+        b.pluginJars(d, k, classpathOf(d, k));
+      }
     }
     return b;
   }
@@ -131,12 +130,12 @@ public class TestCrossDialectTranslation {
 
   /**
    * Builds the system-property key for a given (dialect, kind) and reads the classpath
-   * the Gradle test task populated. The key format — {@code coral.benchmark.plugin.<dialect.id()>.<kind>}
+   * the Gradle test task populated. The key format — {@code coral.benchmark.plugin.<dialect.id()>.<kind.id()>}
    * — must agree with the {@code systemProperty} declarations in
    * {@code coral-benchmark-tests/build.gradle}.
    */
-  private static List<URL> classpathOf(Dialect dialect, String kind) {
-    String propertyName = "coral.benchmark.plugin." + dialect.id() + "." + kind;
+  private static List<URL> classpathOf(Dialect dialect, PluginKind kind) {
+    String propertyName = "coral.benchmark.plugin." + dialect.id() + "." + kind.id();
     String value = System.getProperty(propertyName);
     if (value == null || value.isEmpty()) {
       throw new IllegalStateException("Missing system property " + propertyName
