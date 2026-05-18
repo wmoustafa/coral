@@ -37,12 +37,15 @@ dependencies {
 }
 
 test {
-  // Hand each plugin's resolved classpath to the test JVM via a system property; the
-  // test code parses these into URL lists and feeds them to TranslationTestSuite.
-  systemProperty 'coral.benchmark.plugin.spark.sql.dialect', configurations.sparkSqlDialectPlugin.asPath
-  systemProperty 'coral.benchmark.plugin.spark.engine', configurations.sparkEnginePlugin.asPath
-  systemProperty 'coral.benchmark.plugin.trino.sql.dialect', configurations.trinoSqlDialectPlugin.asPath
-  systemProperty 'coral.benchmark.plugin.trino.engine', configurations.trinoEnginePlugin.asPath
+  // Hand each plugin's resolved classpath to the test JVM via a system property keyed by
+  // <dialect.id()>.<kind>, matching the format the Java side constructs in
+  // TestCrossDialectTranslation.classpathOf(...). The id strings (spark_sql, trino_sql)
+  // are declared once on the Dialect enum in coral-benchmark/.../spi/Dialect.java and
+  // used verbatim here.
+  systemProperty 'coral.benchmark.plugin.spark_sql.dialect', configurations.sparkSqlDialectPlugin.asPath
+  systemProperty 'coral.benchmark.plugin.spark_sql.engine', configurations.sparkEnginePlugin.asPath
+  systemProperty 'coral.benchmark.plugin.trino_sql.dialect', configurations.trinoSqlDialectPlugin.asPath
+  systemProperty 'coral.benchmark.plugin.trino_sql.engine', configurations.trinoEnginePlugin.asPath
 
   if (JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_17)) {
     jvmArgs '--add-opens=java.base/sun.nio.ch=ALL-UNNAMED',

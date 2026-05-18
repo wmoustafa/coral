@@ -52,7 +52,7 @@ public class TestCrossDialectTranslation {
     RowSet users = usersData();
 
     TranslationTestSuite suite =
-        baseBuilder(source, target, catalog, users).queryDir("queries/" + source.name().toLowerCase()).build();
+        baseBuilder(source, target, catalog, users).queryDir("queries/" + source.id()).build();
 
     TestReport report = suite.run();
 
@@ -72,8 +72,8 @@ public class TestCrossDialectTranslation {
     InMemoryCatalog catalog = usersCatalog();
     RowSet users = usersData();
 
-    TranslationTestSuite suite = baseBuilder(source, target, catalog, users)
-        .queryDir("queries/negative/" + source.name().toLowerCase()).build();
+    TranslationTestSuite suite =
+        baseBuilder(source, target, catalog, users).queryDir("queries/negative/" + source.id()).build();
 
     TestReport report = suite.run();
 
@@ -101,15 +101,22 @@ public class TestCrossDialectTranslation {
     return RowSet.builder(usersSchema).addRow(1, "alice").addRow(2, "bob").build();
   }
 
+  /** Dialects the build wires up with plugin jars; iterate these (not Dialect.values()) so
+   *  the test doesn't try to load a HIVE_SQL plugin that doesn't ship yet. */
+  private static final List<Dialect> WIRED_DIALECTS = Arrays.asList(Dialect.SPARK_SQL, Dialect.TRINO_SQL);
+
+  private static final String KIND_DIALECT = "dialect";
+  private static final String KIND_ENGINE = "engine";
+
   private static TranslationTestSuite.Builder baseBuilder(Dialect source, Dialect target, InMemoryCatalog catalog,
       RowSet users) {
-    return TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
-        .verificationLevel(VerificationLevel.RESULT_SET)
-        .dialectPluginJars(Dialect.SPARK_SQL, classpathOf("coral.benchmark.plugin.spark.sql.dialect"))
-        .dialectPluginJars(Dialect.TRINO_SQL, classpathOf("coral.benchmark.plugin.trino.sql.dialect"))
-        .enginePluginJars(Dialect.SPARK_SQL, classpathOf("coral.benchmark.plugin.spark.engine"))
-        .enginePluginJars(Dialect.TRINO_SQL, classpathOf("coral.benchmark.plugin.trino.engine"))
-        .testData("default.users", users);
+    TranslationTestSuite.Builder b = TranslationTestSuite.builder().source(source).target(target).catalog(catalog)
+        .verificationLevel(VerificationLevel.RESULT_SET).testData("default.users", users);
+    for (Dialect d : WIRED_DIALECTS) {
+      b.dialectPluginJars(d, classpathOf(d, KIND_DIALECT));
+      b.enginePluginJars(d, classpathOf(d, KIND_ENGINE));
+    }
+    return b;
   }
 
   private static String describeFailures(TestReport report) {
@@ -122,10 +129,17 @@ public class TestCrossDialectTranslation {
     return sb.toString();
   }
 
-  private static List<URL> classpathOf(String systemProperty) {
-    String value = System.getProperty(systemProperty);
+  /**
+   * Builds the system-property key for a given (dialect, kind) and reads the classpath
+   * the Gradle test task populated. The key format — {@code coral.benchmark.plugin.<dialect.id()>.<kind>}
+   * — must agree with the {@code systemProperty} declarations in
+   * {@code coral-benchmark-tests/build.gradle}.
+   */
+  private static List<URL> classpathOf(Dialect dialect, String kind) {
+    String propertyName = "coral.benchmark.plugin." + dialect.id() + "." + kind;
+    String value = System.getProperty(propertyName);
     if (value == null || value.isEmpty()) {
-      throw new IllegalStateException("Missing system property " + systemProperty
+      throw new IllegalStateException("Missing system property " + propertyName
           + " — Gradle test task should populate it from the matching per-plugin configuration.");
     }
     List<URL> urls = new ArrayList<>();
