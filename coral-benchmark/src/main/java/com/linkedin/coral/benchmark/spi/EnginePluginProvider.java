@@ -15,10 +15,16 @@ package com.linkedin.coral.benchmark.spi;
  * isolated {@link ClassLoader}, which lets each engine plugin carry its own runtime
  * dependencies (Spark, Trino, etc.) without colliding with other plugins' classpaths.
  *
+ * <p>The provider identifies itself by {@link Engine}, not by {@link Dialect}: an
+ * engine is a runtime, distinct from the SQL dialect it executes. A given engine may
+ * natively execute multiple dialects; the framework user wires
+ * {@code (Dialect → engine plugin classpath)} explicitly on the benchmark suite builder
+ * rather than asking the engine plugin to claim a dialect.
+ *
  * <p>Typical implementation:
  * <pre>{@code
  * public final class SparkEnginePluginProvider implements EnginePluginProvider {
- *     public Dialect dialect() { return Dialect.SPARK_SQL; }
+ *     public Engine engine() { return Engine.SPARK; }
  *     public EnginePlugin create() { return new SparkEnginePlugin(); }
  * }
  * }</pre>
@@ -26,11 +32,11 @@ package com.linkedin.coral.benchmark.spi;
 public interface EnginePluginProvider {
 
   /**
-   * Returns the dialect that this provider produces engines for.
+   * Returns the engine this provider produces plugins for.
    *
-   * @return the dialect identifier
+   * @return the engine identifier
    */
-  Dialect dialect();
+  Engine engine();
 
   /**
    * Constructs a new {@link EnginePlugin} instance. The plugin is not yet started — the

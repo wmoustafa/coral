@@ -11,7 +11,7 @@ import java.io.IOException;
 import com.linkedin.coral.benchmark.data.ExplainResult;
 import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
-import com.linkedin.coral.benchmark.spi.Dialect;
+import com.linkedin.coral.benchmark.spi.Engine;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.common.types.CoralDataType;
 
@@ -41,8 +41,8 @@ final class ContextClassLoaderEnginePlugin implements EnginePlugin, Closeable {
   }
 
   @Override
-  public Dialect dialect() {
-    return withContext(delegate::dialect);
+  public Engine engine() {
+    return withContext(delegate::engine);
   }
 
   @Override

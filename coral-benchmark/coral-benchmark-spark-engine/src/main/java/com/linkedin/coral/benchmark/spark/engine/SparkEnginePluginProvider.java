@@ -5,7 +5,7 @@
  */
 package com.linkedin.coral.benchmark.spark.engine;
 
-import com.linkedin.coral.benchmark.spi.Dialect;
+import com.linkedin.coral.benchmark.spi.Engine;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.benchmark.spi.EnginePluginProvider;
 
@@ -17,8 +17,8 @@ import com.linkedin.coral.benchmark.spi.EnginePluginProvider;
 public final class SparkEnginePluginProvider implements EnginePluginProvider {
 
   @Override
-  public Dialect dialect() {
-    return Dialect.SPARK_SQL;
+  public Engine engine() {
+    return Engine.SPARK;
   }
 
   @Override

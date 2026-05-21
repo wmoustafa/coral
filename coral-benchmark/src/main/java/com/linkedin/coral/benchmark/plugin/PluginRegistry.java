@@ -9,11 +9,11 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Objects;
 import java.util.ServiceLoader;
 
-import com.linkedin.coral.benchmark.spi.Dialect;
 import com.linkedin.coral.benchmark.spi.DialectPlugin;
 import com.linkedin.coral.benchmark.spi.DialectPluginProvider;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
@@ -28,8 +28,13 @@ import com.linkedin.coral.common.catalog.CoralCatalog;
  * <p>Each call to {@link #loadDialectPlugin} / {@link #loadEnginePlugin} builds a fresh
  * classloader rooted at the supplied jar URLs, parented to the shared SPI loader. The
  * registry uses {@link ServiceLoader} against that isolated loader to find the provider
- * matching the requested dialect, then invokes the provider's factory method inside the
- * isolated loader.
+ * present on the supplied classpath and invokes its factory method inside the isolated
+ * loader. The registry does <em>not</em> filter providers by dialect / engine identity —
+ * the caller picks the plugin by choosing the classpath, and the provider's own
+ * self-identification ({@link DialectPlugin#dialect()} / {@link EnginePlugin#engine()})
+ * is metadata on the loaded plugin. The caller is responsible for binding a
+ * {@link com.linkedin.coral.benchmark.spi.Dialect} to a particular engine plugin
+ * classpath; the engine itself does not claim a dialect.
  *
  * <p>The returned plugin is the parent-loader-visible {@link DialectPlugin} or
  * {@link EnginePlugin} interface; the concrete implementation classes never leak out.
@@ -51,66 +56,69 @@ public final class PluginRegistry implements Closeable {
   }
 
   /**
-   * Loads a {@link DialectPlugin} for the given dialect from the supplied jar set.
+   * Loads the {@link DialectPlugin} provided by the supplied jar set. Returns the first
+   * provider found on the classpath; the loaded plugin's {@link DialectPlugin#dialect()}
+   * tells the caller which dialect it handles.
    *
-   * @param dialect the dialect the caller wants
    * @param jars    the plugin's runtime classpath
    * @param catalog the catalog the plugin will bind to
    * @return a plugin instance, instantiated inside an isolated classloader
-   * @throws IllegalStateException if no matching provider is found on the supplied jars
+   * @throws IllegalStateException if no provider is found on the supplied jars
    */
-  public DialectPlugin loadDialectPlugin(Dialect dialect, List<URL> jars, CoralCatalog catalog) {
+  public DialectPlugin loadDialectPlugin(List<URL> jars, CoralCatalog catalog) {
     PluginClassLoader loader = new PluginClassLoader(jars.toArray(new URL[0]), sharedParent);
     ClassLoader previous = Thread.currentThread().getContextClassLoader();
     try {
       Thread.currentThread().setContextClassLoader(loader);
-      for (DialectPluginProvider provider : ServiceLoader.load(DialectPluginProvider.class, loader)) {
-        if (provider.dialect() == dialect) {
-          openLoaders.add(loader);
-          return new ContextClassLoaderDialectPlugin(provider.create(catalog), loader);
-        }
+      Iterator<DialectPluginProvider> it = ServiceLoader.load(DialectPluginProvider.class, loader).iterator();
+      if (it.hasNext()) {
+        openLoaders.add(loader);
+        return new ContextClassLoaderDialectPlugin(it.next().create(catalog), loader);
       }
     } finally {
       Thread.currentThread().setContextClassLoader(previous);
     }
-    // Provider wasn't found; release the loader we just opened.
-    try {
-      loader.close();
-    } catch (IOException ignored) {
-    }
-    throw new IllegalStateException("No DialectPluginProvider for " + dialect + " on the supplied classpath ("
-        + jars.size() + " jar(s)). Check META-INF/services registration in the plugin module.");
+    closeQuietly(loader);
+    throw new IllegalStateException(
+        "No DialectPluginProvider found on the supplied classpath (" + jars.size() + " jar(s)). "
+            + "Check META-INF/services/" + DialectPluginProvider.class.getName() + " in the plugin module.");
   }
 
   /**
-   * Loads an {@link EnginePlugin} for the given dialect from the supplied jar set.
+   * Loads the {@link EnginePlugin} provided by the supplied jar set. Returns the first
+   * provider found on the classpath; the loaded plugin's {@link EnginePlugin#engine()}
+   * tells the caller which engine it is. The engine does not claim a SQL dialect — the
+   * caller binds dialects to engine plugins explicitly when configuring the benchmark
+   * suite.
    *
-   * @param dialect the dialect whose engine the caller wants
-   * @param jars    the plugin's runtime classpath
+   * @param jars the plugin's runtime classpath
    * @return an engine plugin instance, instantiated inside an isolated classloader
-   * @throws IllegalStateException if no matching provider is found on the supplied jars
+   * @throws IllegalStateException if no provider is found on the supplied jars
    */
-  public EnginePlugin loadEnginePlugin(Dialect dialect, List<URL> jars) {
+  public EnginePlugin loadEnginePlugin(List<URL> jars) {
     PluginClassLoader loader = new PluginClassLoader(jars.toArray(new URL[0]), sharedParent);
     ClassLoader previous = Thread.currentThread().getContextClassLoader();
     try {
       Thread.currentThread().setContextClassLoader(loader);
-      for (EnginePluginProvider provider : ServiceLoader.load(EnginePluginProvider.class, loader)) {
-        if (provider.dialect() == dialect) {
-          openLoaders.add(loader);
-          return new ContextClassLoaderEnginePlugin(provider.create(), loader);
-        }
+      Iterator<EnginePluginProvider> it = ServiceLoader.load(EnginePluginProvider.class, loader).iterator();
+      if (it.hasNext()) {
+        openLoaders.add(loader);
+        return new ContextClassLoaderEnginePlugin(it.next().create(), loader);
       }
     } finally {
       Thread.currentThread().setContextClassLoader(previous);
     }
-    // Provider wasn't found; release the loader we just opened.
+    closeQuietly(loader);
+    throw new IllegalStateException(
+        "No EnginePluginProvider found on the supplied classpath (" + jars.size() + " jar(s)). "
+            + "Check META-INF/services/" + EnginePluginProvider.class.getName() + " in the plugin module.");
+  }
+
+  private static void closeQuietly(PluginClassLoader loader) {
     try {
       loader.close();
     } catch (IOException ignored) {
     }
-    throw new IllegalStateException("No EnginePluginProvider for " + dialect + " on the supplied classpath ("
-        + jars.size() + " jar(s)). Check META-INF/services registration in the plugin module.");
   }
 
   /**
@@ -124,10 +132,7 @@ public final class PluginRegistry implements Closeable {
   @Override
   public void close() {
     for (PluginClassLoader loader : openLoaders) {
-      try {
-        loader.close();
-      } catch (IOException ignored) {
-      }
+      closeQuietly(loader);
     }
     openLoaders.clear();
   }

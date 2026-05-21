@@ -23,7 +23,7 @@ import org.apache.spark.sql.types.StructType;
 import com.linkedin.coral.benchmark.data.ExplainResult;
 import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
-import com.linkedin.coral.benchmark.spi.Dialect;
+import com.linkedin.coral.benchmark.spi.Engine;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.common.types.CoralDataType;
 
@@ -46,8 +46,8 @@ public final class SparkEnginePlugin implements EnginePlugin {
   private Path warehouseDir;
 
   @Override
-  public Dialect dialect() {
-    return Dialect.SPARK_SQL;
+  public Engine engine() {
+    return Engine.SPARK;
   }
 
   @Override

@@ -33,11 +33,15 @@ import com.linkedin.coral.common.types.CoralDataType;
 public interface EnginePlugin {
 
   /**
-   * Returns the dialect this engine natively executes.
+   * Returns the engine this plugin is. Distinct from {@link Dialect} — an engine is a
+   * runtime, not a SQL language variant. The benchmark framework binds a {@code Dialect}
+   * to a particular engine plugin via the suite builder's
+   * {@code enginePluginJars(Dialect, jars)} wiring; the engine itself does not claim a
+   * dialect.
    *
-   * @return the dialect identifier
+   * @return the engine identifier
    */
-  Dialect dialect();
+  Engine engine();
 
   /**
    * Starts the engine. Called once before any queries are executed.

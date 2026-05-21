@@ -521,10 +521,12 @@ public final class TranslationTestSuite {
       PluginRegistry registry =
           pluginRegistry != null ? pluginRegistry : new PluginRegistry(TranslationTestSuite.class.getClassLoader());
 
-      DialectPlugin resolvedSourcePlugin = registry.loadDialectPlugin(source, dialectJars.get(source), catalog);
-      DialectPlugin resolvedTargetPlugin = registry.loadDialectPlugin(target, dialectJars.get(target), catalog);
-      EnginePlugin resolvedSourceEngine = needSourceEngine ? registry.loadEnginePlugin(source, engineJars.get(source)) : null;
-      EnginePlugin resolvedTargetEngine = needTargetEngine ? registry.loadEnginePlugin(target, engineJars.get(target)) : null;
+      DialectPlugin resolvedSourcePlugin = loadDialectChecked(registry, source, dialectJars.get(source), catalog);
+      DialectPlugin resolvedTargetPlugin = loadDialectChecked(registry, target, dialectJars.get(target), catalog);
+      // Engine plugins don't claim a dialect — the caller's wiring is the source of
+      // truth, so there's nothing to validate here.
+      EnginePlugin resolvedSourceEngine = needSourceEngine ? registry.loadEnginePlugin(engineJars.get(source)) : null;
+      EnginePlugin resolvedTargetEngine = needTargetEngine ? registry.loadEnginePlugin(engineJars.get(target)) : null;
 
       return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin, resolvedSourceEngine,
           resolvedTargetEngine);
@@ -535,6 +537,24 @@ public final class TranslationTestSuite {
         throw new IllegalStateException(
             "Plugin classpath for " + dialect + " is required — call " + setterDescription + " on the builder.");
       }
+    }
+
+    /**
+     * Loads a dialect plugin and validates that the plugin's self-reported dialect
+     * matches what the caller wired the classpath as. A mismatch means the caller
+     * pointed {@code dialectPluginJars(SPARK_SQL, …)} at jars whose provider actually
+     * reports a different dialect — likely a wiring mistake, surfaced eagerly here
+     * rather than as confusing downstream failures.
+     */
+    private static DialectPlugin loadDialectChecked(PluginRegistry registry, Dialect declared,
+        List<java.net.URL> jars, CoralCatalog catalog) {
+      DialectPlugin plugin = registry.loadDialectPlugin(jars, catalog);
+      if (plugin.dialect() != declared) {
+        throw new IllegalStateException("Dialect plugin loaded from the supplied classpath self-identifies as "
+            + plugin.dialect() + ", but the suite wired it as " + declared
+            + ". Check the dialectPluginJars(...) call on the builder.");
+      }
+      return plugin;
     }
   }
 }

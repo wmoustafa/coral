@@ -31,7 +31,7 @@ import io.trino.testing.MaterializedRow;
 import com.linkedin.coral.benchmark.data.ExplainResult;
 import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
-import com.linkedin.coral.benchmark.spi.Dialect;
+import com.linkedin.coral.benchmark.spi.Engine;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.common.types.CoralDataType;
 import com.linkedin.coral.common.types.CoralTypeKind;
@@ -53,8 +53,8 @@ public final class TrinoEnginePlugin implements EnginePlugin {
   private LocalQueryRunner runner;
 
   @Override
-  public Dialect dialect() {
-    return Dialect.TRINO_SQL;
+  public Engine engine() {
+    return Engine.TRINO;
   }
 
   @Override
