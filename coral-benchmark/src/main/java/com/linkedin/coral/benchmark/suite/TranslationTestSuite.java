@@ -5,7 +5,6 @@
  */
 package com.linkedin.coral.benchmark.suite;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
@@ -34,9 +33,10 @@ import com.linkedin.coral.benchmark.comparison.ResultSetComparator;
 import com.linkedin.coral.benchmark.data.ExplainResult;
 import com.linkedin.coral.benchmark.data.ResultSet;
 import com.linkedin.coral.benchmark.data.RowSet;
-import com.linkedin.coral.benchmark.plugin.PluginRegistry;
+import com.linkedin.coral.benchmark.plugin.PluginCatalog;
 import com.linkedin.coral.benchmark.spi.Dialect;
 import com.linkedin.coral.benchmark.spi.DialectPlugin;
+import com.linkedin.coral.benchmark.spi.Engine;
 import com.linkedin.coral.benchmark.spi.EnginePlugin;
 import com.linkedin.coral.benchmark.spi.VerificationLevel;
 import com.linkedin.coral.common.catalog.CoralCatalog;
@@ -47,28 +47,26 @@ import com.linkedin.coral.common.types.StructType;
 /**
  * Main orchestrator for cross-dialect translation benchmark tests.
  *
- * <p>A test suite is parameterized by source dialect, target dialect, verification level,
- * the catalog, and the runtime classpath URLs of the dialect / engine plugins it needs. It
- * reads all {@code .sql} files from the configured query directory, translates each
- * through the Coral IR pipeline, and verifies the result at the configured level.
+ * <p>A test suite is parameterized by source {@code (engine, dialect)}, target
+ * {@code (engine, dialect)}, a verification level, a Coral catalog, and a query
+ * directory. It reads all {@code .sql} files from the configured directory, translates
+ * each through the Coral IR pipeline, and verifies the result at the configured level.
  *
- * <p>Every plugin is materialized inside its own {@link PluginRegistry}-managed
- * classloader — there is intentionally no path that lets a caller hand in a pre-built
- * {@link DialectPlugin} or {@link EnginePlugin} instance, because that would bypass the
- * classpath isolation the harness exists to provide.
+ * <p>Plugin discovery is decoupled from scenario specification: a {@link PluginCatalog}
+ * owns which plugins are deployed (where their jars live, how they self-identify), while
+ * the suite only names what it wants in terms of {@link Engine} and {@link Dialect}
+ * values. Callers can supply a custom catalog or let the builder default to
+ * {@link PluginCatalog#discoverFromSystemProperties()} — in either case the suite never
+ * sees jar URLs.
  *
  * <p>Usage:
  * <pre>{@code
  * TranslationTestSuite suite = TranslationTestSuite.builder()
- *     .source(Dialect.SPARK_SQL)
- *     .target(Dialect.TRINO_SQL)
+ *     .source(Engine.SPARK, Dialect.SPARK_SQL)
+ *     .target(Engine.TRINO, Dialect.TRINO_SQL)
  *     .catalog(catalog)
  *     .queryDir("queries/spark_sql")
  *     .verificationLevel(VerificationLevel.RESULT_SET)
- *     .dialectPluginJars(Dialect.SPARK_SQL, sparkDialectJars)
- *     .dialectPluginJars(Dialect.TRINO_SQL, trinoDialectJars)
- *     .enginePluginJars(Dialect.SPARK_SQL, sparkEngineJars)
- *     .enginePluginJars(Dialect.TRINO_SQL, trinoEngineJars)
  *     .testData("default.users", userData)
  *     .build();
  *
@@ -88,11 +86,13 @@ public final class TranslationTestSuite {
   private final EnginePlugin targetEngine;
   private final Map<String, RowSet> testData;
   private final ComparisonConfig comparisonConfig;
+  private final PluginCatalog pluginCatalog;
+  private final boolean ownsCatalog;
 
   private TranslationTestSuite(Builder builder, DialectPlugin sourcePlugin, DialectPlugin targetPlugin,
-      EnginePlugin sourceEngine, EnginePlugin targetEngine) {
-    this.source = builder.source;
-    this.target = builder.target;
+      EnginePlugin sourceEngine, EnginePlugin targetEngine, PluginCatalog pluginCatalog, boolean ownsCatalog) {
+    this.source = builder.sourceDialect;
+    this.target = builder.targetDialect;
     this.catalog = builder.catalog;
     this.queryDir = builder.queryDir;
     this.verificationLevel = builder.verificationLevel;
@@ -102,6 +102,8 @@ public final class TranslationTestSuite {
     this.targetEngine = targetEngine;
     this.testData = Collections.unmodifiableMap(new HashMap<>(builder.testData));
     this.comparisonConfig = builder.comparisonConfig;
+    this.pluginCatalog = pluginCatalog;
+    this.ownsCatalog = ownsCatalog;
   }
 
   /**
@@ -156,32 +158,25 @@ public final class TranslationTestSuite {
           sourceEngine.stop();
         } catch (Throwable ignored) {
         }
-        closeQuietly(sourceEngine);
       }
       if (needTargetEngine) {
         try {
           targetEngine.stop();
         } catch (Throwable ignored) {
         }
-        closeQuietly(targetEngine);
       }
-      // Dialect plugins don't have a stop() method but they DO hold a PluginClassLoader
-      // when loaded via PluginRegistry; closing releases the loader and unblocks GC of
-      // any cached converter state.
-      closeQuietly(sourcePlugin);
-      closeQuietly(targetPlugin);
+      // The plugin classloaders are owned by the PluginCatalog. If this suite owns the
+      // catalog (because the builder created one for us), close it — that releases every
+      // loader. If the caller supplied a catalog, leave its lifecycle alone.
+      if (ownsCatalog) {
+        try {
+          pluginCatalog.close();
+        } catch (Throwable ignored) {
+        }
+      }
     }
 
     return new TestReport(source, target, verificationLevel, results);
-  }
-
-  private static void closeQuietly(Object o) {
-    if (o instanceof Closeable) {
-      try {
-        ((Closeable) o).close();
-      } catch (Throwable ignored) {
-      }
-    }
   }
 
   private QueryTestResult runOne(QueryFile q, ResultSetComparator comparator) {
@@ -323,25 +318,24 @@ public final class TranslationTestSuite {
   /**
    * Builder for {@link TranslationTestSuite}.
    *
-   * <p>Required for all levels: source, target, catalog, queryDir, verificationLevel,
-   * and {@link #dialectPluginJars} for both the source and target dialects.
-   * <p>Required for EXPLAIN: {@link #enginePluginJars} for the target dialect.
-   * <p>Required for RESULT_SET: {@link #enginePluginJars} for both source and target
-   * dialects, plus {@link #testData}.
+   * <p>Required for all levels: source, target, catalog, queryDir, verificationLevel.
+   * <p>Required for RESULT_SET: at least one {@link #testData} entry.
    *
-   * <p>Plugins are always materialized inside a {@link PluginRegistry}-managed
-   * classloader, rooted at the supplied jar URLs, so the harness's classpath-isolation
-   * guarantees hold for every code path.
+   * <p>Plugins come from a {@link PluginCatalog}, which the builder either inherits
+   * via {@link #pluginCatalog} or constructs by default via
+   * {@link PluginCatalog#discoverFromSystemProperties()}. The builder names what it
+   * needs by {@link Engine} and {@link Dialect}; deployment specifics (jar URLs,
+   * plugin module names) stay in the catalog.
    */
   public static final class Builder {
-    private Dialect source;
-    private Dialect target;
+    private Engine sourceEngineId;
+    private Dialect sourceDialect;
+    private Engine targetEngineId;
+    private Dialect targetDialect;
     private CoralCatalog catalog;
     private String queryDir;
     private VerificationLevel verificationLevel;
-    private final Map<Dialect, List<java.net.URL>> dialectJars = new HashMap<>();
-    private final Map<Dialect, List<java.net.URL>> engineJars = new HashMap<>();
-    private PluginRegistry pluginRegistry;
+    private PluginCatalog pluginCatalog;
     private final Map<String, RowSet> testData = new HashMap<>();
     private ComparisonConfig comparisonConfig = ComparisonConfig.defaults();
 
@@ -349,32 +343,35 @@ public final class TranslationTestSuite {
     }
 
     /**
-     * Sets the source dialect.
+     * Sets the source side of the scenario: the engine that executes the source SQL,
+     * and the SQL dialect to parse it as.
      *
-     * @param source the dialect of the input queries
+     * @param engine  the engine that executes the source SQL
+     * @param dialect the source SQL dialect
      * @return this builder
      */
-    public Builder source(Dialect source) {
-      this.source = Objects.requireNonNull(source);
+    public Builder source(Engine engine, Dialect dialect) {
+      this.sourceEngineId = Objects.requireNonNull(engine, "engine");
+      this.sourceDialect = Objects.requireNonNull(dialect, "dialect");
       return this;
     }
 
     /**
-     * Sets the target dialect.
+     * Sets the target side of the scenario: the engine that executes the translated
+     * SQL, and the SQL dialect to translate into.
      *
-     * @param target the dialect to translate queries into
+     * @param engine  the engine that executes the translated SQL
+     * @param dialect the target SQL dialect
      * @return this builder
      */
-    public Builder target(Dialect target) {
-      this.target = Objects.requireNonNull(target);
+    public Builder target(Engine engine, Dialect dialect) {
+      this.targetEngineId = Objects.requireNonNull(engine, "engine");
+      this.targetDialect = Objects.requireNonNull(dialect, "dialect");
       return this;
     }
 
     /**
      * Sets the catalog providing table metadata for query resolution.
-     *
-     * @param catalog the catalog (typically an {@link com.linkedin.coral.benchmark.catalog.InMemoryCatalog})
-     * @return this builder
      */
     public Builder catalog(CoralCatalog catalog) {
       this.catalog = Objects.requireNonNull(catalog);
@@ -382,11 +379,7 @@ public final class TranslationTestSuite {
     }
 
     /**
-     * Sets the directory containing .sql query files.
-     * Path is relative to the classpath (test resources).
-     *
-     * @param queryDir the directory path (e.g., "queries/hive")
-     * @return this builder
+     * Sets the directory containing .sql query files (classpath-relative).
      */
     public Builder queryDir(String queryDir) {
       this.queryDir = Objects.requireNonNull(queryDir);
@@ -395,9 +388,6 @@ public final class TranslationTestSuite {
 
     /**
      * Sets the verification level.
-     *
-     * @param level the level of verification to perform
-     * @return this builder
      */
     public Builder verificationLevel(VerificationLevel level) {
       this.verificationLevel = Objects.requireNonNull(level);
@@ -405,58 +395,19 @@ public final class TranslationTestSuite {
     }
 
     /**
-     * Registers the runtime classpath for a dialect plugin. The plugin is materialized
-     * inside an isolated {@link PluginRegistry} classloader. Required for both the
-     * source and target dialects at every verification level.
-     *
-     * @param dialect the dialect the jars provide
-     * @param jars    the plugin module's full runtime classpath (jar URLs)
-     * @return this builder
+     * Overrides the {@link PluginCatalog}. By default the builder uses
+     * {@link PluginCatalog#discoverFromSystemProperties()} and owns its lifecycle
+     * (closes it when the suite finishes). Supplying a catalog here transfers
+     * lifecycle ownership to the caller.
      */
-    public Builder dialectPluginJars(Dialect dialect, List<java.net.URL> jars) {
-      Objects.requireNonNull(dialect);
-      Objects.requireNonNull(jars);
-      this.dialectJars.put(dialect, jars);
+    public Builder pluginCatalog(PluginCatalog catalog) {
+      this.pluginCatalog = Objects.requireNonNull(catalog);
       return this;
     }
 
     /**
-     * Registers the runtime classpath for an engine plugin. The engine is instantiated
-     * inside an isolated {@link PluginRegistry} classloader via its
-     * {@link com.linkedin.coral.benchmark.spi.EnginePluginProvider}, and every call into
-     * the engine swaps the thread context classloader so Spark/Trino's internal lookups
-     * land inside their own jars.
-     *
-     * @param dialect the dialect the engine runs natively
-     * @param jars    the engine module's full runtime classpath (jar URLs)
-     * @return this builder
-     */
-    public Builder enginePluginJars(Dialect dialect, List<java.net.URL> jars) {
-      Objects.requireNonNull(dialect);
-      Objects.requireNonNull(jars);
-      this.engineJars.put(dialect, jars);
-      return this;
-    }
-
-    /**
-     * Overrides the {@link PluginRegistry} used to load isolated plugins. By default a
-     * registry rooted at {@code TranslationTestSuite}'s own classloader is used.
-     *
-     * @param registry the registry
-     * @return this builder
-     */
-    public Builder pluginRegistry(PluginRegistry registry) {
-      this.pluginRegistry = Objects.requireNonNull(registry);
-      return this;
-    }
-
-    /**
-     * Adds test data for a table. The key is the fully qualified table name
-     * (e.g., "db.users"). Required for {@link VerificationLevel#RESULT_SET}.
-     *
-     * @param qualifiedTableName the fully qualified table name ("namespace.table")
-     * @param data               the row data
-     * @return this builder
+     * Adds test data for a table (key: {@code "namespace.table"}). Required for
+     * {@link VerificationLevel#RESULT_SET}.
      */
     public Builder testData(String qualifiedTableName, RowSet data) {
       Objects.requireNonNull(qualifiedTableName);
@@ -467,9 +418,6 @@ public final class TranslationTestSuite {
 
     /**
      * Adds test data for multiple tables at once.
-     *
-     * @param testData a map from fully qualified table names to row data
-     * @return this builder
      */
     public Builder testData(Map<String, RowSet> testData) {
       Objects.requireNonNull(testData);
@@ -480,9 +428,6 @@ public final class TranslationTestSuite {
     /**
      * Sets the comparison config for result-set comparison. Defaults to
      * {@link ComparisonConfig#defaults()} if not set.
-     *
-     * @param config the comparison config
-     * @return this builder
      */
     public Builder comparisonConfig(ComparisonConfig config) {
       this.comparisonConfig = Objects.requireNonNull(config);
@@ -491,70 +436,53 @@ public final class TranslationTestSuite {
 
     /**
      * Builds the test suite, validating that all required configuration is present
-     * for the requested verification level.
-     *
-     * @return a new TranslationTestSuite
-     * @throws IllegalStateException if required configuration is missing
+     * and that every needed plugin is available in the catalog.
      */
     public TranslationTestSuite build() {
-      Objects.requireNonNull(source, "Source dialect is required");
-      Objects.requireNonNull(target, "Target dialect is required");
+      Objects.requireNonNull(sourceEngineId, "Source engine is required — call .source(engine, dialect)");
+      Objects.requireNonNull(sourceDialect, "Source dialect is required — call .source(engine, dialect)");
+      Objects.requireNonNull(targetEngineId, "Target engine is required — call .target(engine, dialect)");
+      Objects.requireNonNull(targetDialect, "Target dialect is required — call .target(engine, dialect)");
       Objects.requireNonNull(catalog, "Catalog is required");
       Objects.requireNonNull(queryDir, "Query directory is required");
       Objects.requireNonNull(verificationLevel, "Verification level is required");
 
       boolean needTargetEngine = verificationLevel.ordinal() >= VerificationLevel.EXPLAIN.ordinal();
       boolean needSourceEngine = verificationLevel == VerificationLevel.RESULT_SET;
-
-      requireJars(dialectJars, source, "dialectPluginJars(source, ...)");
-      requireJars(dialectJars, target, "dialectPluginJars(target, ...)");
-      if (needTargetEngine) {
-        requireJars(engineJars, target, "enginePluginJars(target, ...) (required for " + verificationLevel + ")");
-      }
-      if (needSourceEngine) {
-        requireJars(engineJars, source, "enginePluginJars(source, ...) (required for RESULT_SET)");
-      }
       if (verificationLevel == VerificationLevel.RESULT_SET && testData.isEmpty()) {
         throw new IllegalStateException("Test data is required for RESULT_SET verification");
       }
 
-      PluginRegistry registry =
-          pluginRegistry != null ? pluginRegistry : new PluginRegistry(TranslationTestSuite.class.getClassLoader());
-
-      DialectPlugin resolvedSourcePlugin = loadDialectChecked(registry, source, dialectJars.get(source), catalog);
-      DialectPlugin resolvedTargetPlugin = loadDialectChecked(registry, target, dialectJars.get(target), catalog);
-      // Engine plugins don't claim a dialect — the caller's wiring is the source of
-      // truth, so there's nothing to validate here.
-      EnginePlugin resolvedSourceEngine = needSourceEngine ? registry.loadEnginePlugin(engineJars.get(source)) : null;
-      EnginePlugin resolvedTargetEngine = needTargetEngine ? registry.loadEnginePlugin(engineJars.get(target)) : null;
-
-      return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin, resolvedSourceEngine,
-          resolvedTargetEngine);
-    }
-
-    private static void requireJars(Map<Dialect, List<java.net.URL>> jars, Dialect dialect, String setterDescription) {
-      if (!jars.containsKey(dialect)) {
-        throw new IllegalStateException(
-            "Plugin classpath for " + dialect + " is required — call " + setterDescription + " on the builder.");
+      PluginCatalog resolvedCatalog;
+      boolean ownsCatalog;
+      if (pluginCatalog != null) {
+        resolvedCatalog = pluginCatalog;
+        ownsCatalog = false;
+      } else {
+        resolvedCatalog = PluginCatalog.discoverFromSystemProperties(TranslationTestSuite.class.getClassLoader());
+        ownsCatalog = true;
       }
-    }
 
-    /**
-     * Loads a dialect plugin and validates that the plugin's self-reported dialect
-     * matches what the caller wired the classpath as. A mismatch means the caller
-     * pointed {@code dialectPluginJars(SPARK_SQL, …)} at jars whose provider actually
-     * reports a different dialect — likely a wiring mistake, surfaced eagerly here
-     * rather than as confusing downstream failures.
-     */
-    private static DialectPlugin loadDialectChecked(PluginRegistry registry, Dialect declared,
-        List<java.net.URL> jars, CoralCatalog catalog) {
-      DialectPlugin plugin = registry.loadDialectPlugin(jars, catalog);
-      if (plugin.dialect() != declared) {
-        throw new IllegalStateException("Dialect plugin loaded from the supplied classpath self-identifies as "
-            + plugin.dialect() + ", but the suite wired it as " + declared
-            + ". Check the dialectPluginJars(...) call on the builder.");
+      try {
+        DialectPlugin resolvedSourcePlugin = resolvedCatalog.createDialectPlugin(sourceDialect, catalog);
+        DialectPlugin resolvedTargetPlugin = resolvedCatalog.createDialectPlugin(targetDialect, catalog);
+        EnginePlugin resolvedSourceEngine =
+            needSourceEngine ? resolvedCatalog.createEnginePlugin(sourceEngineId) : null;
+        EnginePlugin resolvedTargetEngine =
+            needTargetEngine ? resolvedCatalog.createEnginePlugin(targetEngineId) : null;
+
+        return new TranslationTestSuite(this, resolvedSourcePlugin, resolvedTargetPlugin, resolvedSourceEngine,
+            resolvedTargetEngine, resolvedCatalog, ownsCatalog);
+      } catch (RuntimeException e) {
+        // Resolution failed after we opened our own catalog — close it before propagating.
+        if (ownsCatalog) {
+          try {
+            resolvedCatalog.close();
+          } catch (RuntimeException ignored) {
+          }
+        }
+        throw e;
       }
-      return plugin;
     }
   }
 }
