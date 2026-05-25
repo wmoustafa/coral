@@ -23,26 +23,27 @@ import java.util.Set;
  *
  * <p>Two-zone delegation:
  * <ul>
- *   <li><b>Parent-exposed namespaces</b> — JVM types, the benchmark SPI, Coral common
- *       types, and Apache Calcite (because {@code RelNode} crosses the SPI boundary).
- *       These ALWAYS load from the parent so that types passed across the boundary are
- *       the same {@code Class} in every loader.</li>
- *   <li><b>Everything else</b> — child-first: look in the plugin's own jars before
- *       falling back to the parent. This is what lets two plugins co-exist with
- *       conflicting versions of Jackson, Avatica, SLF4J bindings, Spark or Trino runtime
- *       classes, etc.</li>
+ *   <li><b>Parent-owned</b> — JVM types, the benchmark SPI, Coral common types, Coral's
+ *       shaded third-party namespace, and Apache Calcite. These ALWAYS load from the parent
+ *       so that types passed across the SPI boundary are the same {@code Class} in every
+ *       loader.</li>
+ *   <li><b>Everything else</b> — child-first with a parent fallback: look in the plugin's
+ *       own jars before falling back to the parent. This is what lets two plugins co-exist
+ *       with conflicting versions of Jackson, Avatica, SLF4J bindings, Spark or Trino
+ *       runtime classes, etc. The parent fallback covers JDK {@code javax.*} modules
+ *       (naming, xml, crypto, ...) that the plugin doesn't bundle.</li>
  * </ul>
  *
- * <p>The list of parent-exposed prefixes is intentionally tight: only what genuinely
- * crosses the SPI boundary, plus the JVM. Anything else is free to live in two loaders
- * simultaneously without interfering.
+ * <p>The parent-owned list is intentionally tight: only what genuinely crosses the SPI
+ * boundary, plus the JVM. Anything else is free to live in two loaders simultaneously
+ * without interfering.
  */
 public final class PluginClassLoader extends URLClassLoader {
 
-  // Force-parent: types that MUST resolve to the parent's Class object for SPI boundary
+  // Parent-owned: types that MUST resolve to the parent's Class object for SPI boundary
   // crossings to type-check. Plugin code that references these names always sees the parent
   // version, even if the plugin's own jars contain a copy.
-  private static final List<String> FORCE_PARENT_PREFIXES = Arrays.asList(
+  private static final List<String> PARENT_OWNED_PREFIXES = Arrays.asList(
       // JVM / platform (parent always wins)
       "java.", "sun.", "jdk.",
       // Benchmark SPI and shared data types
@@ -61,12 +62,6 @@ public final class PluginClassLoader extends URLClassLoader {
       "com.linkedin.coral.com.",
       // Apache Calcite — RelNode is the IR currency crossing the SPI
       "org.apache.calcite.");
-
-  // Parent-first: prefer the parent's copy when available (e.g. javax.* extensions baked
-  // into the JDK or the test JVM's classpath), but fall back to the plugin's own jar if
-  // the parent doesn't have it. This handles modules like javax.servlet that Spark
-  // bundles itself.
-  private static final List<String> PARENT_FIRST_FALLBACK_PREFIXES = Arrays.asList("javax.", "org.w3c.", "org.xml.");
 
   private final ClassLoader sharedParent;
 
@@ -88,54 +83,21 @@ public final class PluginClassLoader extends URLClassLoader {
   protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
     synchronized (getClassLoadingLock(name)) {
       Class<?> loaded = findLoadedClass(name);
-      if (loaded != null) {
-        if (resolve) {
-          resolveClass(loaded);
-        }
-        return loaded;
+      if (loaded == null) {
+        loaded = isParentOwned(name) ? sharedParent.loadClass(name) : loadChildFirst(name);
       }
+      if (resolve) {
+        resolveClass(loaded);
+      }
+      return loaded;
+    }
+  }
 
-      if (isForceParent(name)) {
-        // Force-delegate to parent so SPI types are identical across loaders.
-        Class<?> fromParent = sharedParent.loadClass(name);
-        if (resolve) {
-          resolveClass(fromParent);
-        }
-        return fromParent;
-      }
-
-      if (isParentFirstFallback(name)) {
-        // Try parent first (so SDK-provided extensions win), but fall back to the plugin
-        // for modules that aren't on the parent classpath.
-        try {
-          Class<?> fromParent = sharedParent.loadClass(name);
-          if (resolve) {
-            resolveClass(fromParent);
-          }
-          return fromParent;
-        } catch (ClassNotFoundException parentMiss) {
-          Class<?> own = findClass(name);
-          if (resolve) {
-            resolveClass(own);
-          }
-          return own;
-        }
-      }
-
-      // Child-first: look in this plugin's jars before parent.
-      try {
-        Class<?> own = findClass(name);
-        if (resolve) {
-          resolveClass(own);
-        }
-        return own;
-      } catch (ClassNotFoundException local) {
-        Class<?> fromParent = sharedParent.loadClass(name);
-        if (resolve) {
-          resolveClass(fromParent);
-        }
-        return fromParent;
-      }
+  private Class<?> loadChildFirst(String name) throws ClassNotFoundException {
+    try {
+      return findClass(name);
+    } catch (ClassNotFoundException notInPlugin) {
+      return sharedParent.loadClass(name);
     }
   }
 
@@ -162,7 +124,7 @@ public final class PluginClassLoader extends URLClassLoader {
     // ServiceLoader.load(spi, loader) calls loader.getResources("META-INF/services/<spi>").
     // The default URLClassLoader implementation walks the parent first, so a competing
     // provider service file on the parent classpath would shadow the plugin's own. Mirror
-    // the child-first rule from loadClass/getResource here: force-parent resources still
+    // the child-first rule from loadClass/getResource here: parent-owned resources still
     // come from the parent, but everything else lists plugin entries first, with parent
     // entries appended for completeness (de-duplicated).
     if (isParentExposedResource(name)) {
@@ -180,17 +142,8 @@ public final class PluginClassLoader extends URLClassLoader {
     return Collections.enumeration(new ArrayList<>(seen));
   }
 
-  private boolean isForceParent(String className) {
-    for (String prefix : FORCE_PARENT_PREFIXES) {
-      if (className.startsWith(prefix)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private boolean isParentFirstFallback(String className) {
-    for (String prefix : PARENT_FIRST_FALLBACK_PREFIXES) {
+  private boolean isParentOwned(String className) {
+    for (String prefix : PARENT_OWNED_PREFIXES) {
       if (className.startsWith(prefix)) {
         return true;
       }
@@ -199,7 +152,7 @@ public final class PluginClassLoader extends URLClassLoader {
   }
 
   private boolean isParentExposedResource(String resourceName) {
-    // Conservative: only force-parent for resources that mirror force-parent classes.
+    // Conservative: only force-parent for resources that mirror parent-owned classes.
     // Plugin SPI service files (META-INF/services/*) must come from the plugin jars,
     // not from parent, otherwise ServiceLoader on a per-plugin loader sees nothing.
     return resourceName.startsWith("java/");
